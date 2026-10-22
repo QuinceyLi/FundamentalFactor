@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fundamental-factor"
+version = "0.2.0"
+description = "Point-in-time weekly single-factor backtests and standalone reports"
+requires-python = ">=3.10"
+dependencies = ["numpy", "pandas", "pyarrow", "scipy", "statsmodels", "openpyxl"]
+
+[project.scripts]
+fundamental-factor = "fundamental_factor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["fundamental_factor*"]

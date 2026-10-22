@@ -1,0 +1,83 @@
+{
+  "schema_version": 2,
+  "data_root": "/data/mongo",
+  "output_dir": "../outputs/factor_test_industry",
+  "dataset_kind": "observed",
+  "classification_workbook": "/home/liqinghua/.codex/attachments/413d870c-c9f9-4abc-936a-cbe2822ef3a4/因子分类.xlsx",
+  "factors": [
+    {
+      "name": "ROIC_new",
+      "label": "ROIC",
+      "source": "roic",
+      "column": "ROIC_new"
+    },
+    {
+      "name": "fundnum_promotion",
+      "label": "公募持仓变化",
+      "source": "fund",
+      "column": "fundnum_promotion"
+    }
+  ],
+  "sources": {
+    "roic": "fs_quality_fnew.feather",
+    "fund": "alternative_fundnum_promotion.feather",
+    "quotes": "quotefac.feather",
+    "risk": "risk_barra.feather",
+    "stocks": "public_stock_master_sh_sz.feather",
+    "history": null,
+    "calendar": "public_trade_calendar_sina.feather",
+    "status": "/home/liqinghua/FundamentalFactor/outputs/gfoptim_inputs/status_candidates.parquet",
+    "terminal": null,
+    "execution_quotes": "/home/liqinghua/FundamentalFactor/outputs/gfoptim_inputs/raw_quotes.parquet",
+    "execution_status": "/home/liqinghua/FundamentalFactor/outputs/gfoptim_inputs/status_candidates.parquet",
+    "corporate_actions": "/home/liqinghua/FundamentalFactor/outputs/gfoptim_inputs/corporate_actions_partial.parquet",
+    "execution_terminal": null
+  },
+  "point_in_time_confirmed": true,
+  "point_in_time_evidence": "用户确认明细文件 date 表示当时已公开可用的快照；审计核对历史快照时序，不额外统一施加财报披露滞后。",
+  "price_contract": {
+    "verified": false,
+    "total_return": false,
+    "suspended_total_return": false,
+    "description": "待验证：已确认000001.SZ在2025-05-28存在复权价格跳变；不可直接用于正式收益。",
+    "open_column": "acc_open",
+    "close_column": "acc_close"
+  },
+  "backtest": {
+    "min_listing_sessions": 120,
+    "start_date": null,
+    "end_date": null
+  },
+  "preprocess": {
+    "mad_multiplier": 5.0,
+    "mad_normalizer": 1.4826,
+    "fallback_quantiles": [
+      0.01,
+      0.99
+    ],
+    "rank_tolerance": 1e-10
+  },
+  "metrics": {
+    "annualization": 52,
+    "nw_lag": 13
+  },
+  "execution": {
+    "enabled": true,
+    "initial_capital": 1000000.0,
+    "raw_prices_verified": false,
+    "status_verified": false,
+    "corporate_actions_complete": false,
+    "coverage_start": "2025-01-01",
+    "coverage_end": "2026-08-31",
+    "description": "原始行情按键接续，停牌为成交量代理，历史涨跌停及完整公司行动待核验。日历已与新浪逐日核对；股票主表源自沪深交易所官方在市和退市记录。本配置选择沪深A股，纯行业中性不要求实际市值。"
+  },
+  "neutralization": {
+    "include_float_mcap": false
+  },
+  "universe": {
+    "exchanges": [
+      "SH",
+      "SZ"
+    ]
+  }
+}

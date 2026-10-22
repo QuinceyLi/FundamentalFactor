@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+outputs/
+build/
+dist/
+
+# Local credentials and research inputs
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.feather
+*.parquet
+# Local reference papers; not required to run the framework
+docs/*.pdf
