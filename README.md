@@ -1,10 +1,10 @@
 # 单因子周度回测框架
 
-对照附件测试报告，分别测试 `ROIC_new` 和 `fundnum_promotion`。默认每个因子生成原始信号、中性化、全中性三套结果，也可按配置选择其中的版本。输出包含覆盖度、RankIC/Pearson IC、十分组净值、超额净值、Q10−Q1、年度表现和双边换手。**不训练预测模型，也不使用持仓优化器**；理论组合直接使用冻结的组内等权，执行账本仅落实权重及成交约束。配置中的因子列表可以扩展到其他明细文件。
+对照附件测试报告，分别测试 `ROIC_new` 和 `fundnum_promotion`。默认每个因子生成原始信号、中性化、全中性三套结果，也可按配置选择其中的版本。输出包含覆盖度、RankIC/Pearson IC、十分组净值、超额净值、Q10−Q1、年度表现和双边换手。**不训练预测模型，也不使用持仓优化器**；目标持仓直接使用冻结的组内等权，缺失收益的统计权重另行记录，执行账本仅落实权重及成交约束。配置中的因子列表可以扩展到其他明细文件。
 
-当前推荐 `configs/factor_test_classic.json`，产物写入 `outputs/factor_test_classic/`：明确使用沪深A股，`neutralization.include_float_mcap=false`，输出原始、纯行业中性、行业加20项Barra中性三套结果。纯行业中性不需要行业市值或个股市值。历史行业采用现有 `class` 分类控制，保留类别35的混合性质。`neutralization.variants` 可只选 `raw`，此时不要求行业、市值或 Barra 暴露。旧配置及冻结产物保留。
+当前推荐 `configs/factor_test_available.json`，产物写入 `outputs/factor_test_available/`：明确使用沪深A股，`neutralization.include_float_mcap=false`，输出原始、纯行业中性、行业加20项Barra中性三套结果；显式采用 `missing_returns=available_case` 和 `empty_groups=cash`。纯行业中性不需要行业市值或个股市值。历史行业采用现有 `class` 分类控制，保留类别35的混合性质。`neutralization.variants` 可只选 `raw`，此时不要求行业、市值或 Barra 暴露。原 `configs/factor_test_classic.json` 及冻结产物保留，便于比较旧的完整标签统计口径。
 
-经典模式把核心因子统计与可选筛选、执行数据分开：完整历史 ST、完整停复牌/涨跌停例外、公司行动明细及真实退市现金不作为统一门槛。已有官方 ST 历史和 GF 停牌/涨跌停代理继续使用；未覆盖状态保持未知。缺失标签仅影响对应 IC 配对或持仓组合，未受影响结果继续计算。可选执行账本未满足附加记账要求时单独跳过，并披露原因。此前2026-10-13的数据报告属于历史审计记录。
+经典模式把核心因子统计与可选筛选、执行数据分开：完整历史 ST、完整停复牌/涨跌停例外、公司行动明细及真实退市现金不作为统一门槛。已有官方 ST 历史和 GF 停牌/涨跌停代理继续使用；未覆盖状态保持未知。推荐配置在冻结组内按有效收益统计，不因一只股票缺失标签而使整个组合当周无收益；同时披露缺失股票数和目标权重。可选执行账本未满足附加记账要求时单独跳过，并披露原因。此前2026-10-13的数据报告属于历史审计记录。
 
 这一输入分层参考 [Alphalens 的因子与未来收益接口](https://github.com/quantopian/alphalens/blob/master/alphalens/utils.py)、[Qlib 的因子评价接口](https://github.com/microsoft/qlib/blob/main/qlib/contrib/eva/alpha.py)以及[独立交易模块](https://github.com/microsoft/qlib/blob/main/qlib/backtest/exchange.py)。冻结信号后不因缺失未来收益而重分组，是本项目保留的研究约定；不声称与这些框架的所有默认处理逐项相同。
 
@@ -13,10 +13,10 @@
 Python ≥3.10，依赖 pandas、PyArrow、NumPy、SciPy、statsmodels、openpyxl。当前机器的 `/usr/bin/python3` 已有依赖；若 pyenv 默认解释器缺包，将下列命令中的 `python3` 替换为 `/usr/bin/python3`。其他环境可用 `python3 -m pip install -e .` 安装。
 
 ```bash
-python3 -m fundamental_factor audit --config configs/factor_test_classic.json
-python3 -m fundamental_factor build-panel --config configs/factor_test_classic.json
-OPENBLAS_NUM_THREADS=1 python3 -m fundamental_factor run --config configs/factor_test_classic.json
-python3 -m fundamental_factor report --run-dir outputs/factor_test_classic
+python3 -m fundamental_factor audit --config configs/factor_test_available.json
+python3 -m fundamental_factor build-panel --config configs/factor_test_available.json
+OPENBLAS_NUM_THREADS=1 python3 -m fundamental_factor run --config configs/factor_test_available.json
+python3 -m fundamental_factor report --run-dir outputs/factor_test_available
 ```
 
 退出码 `0`：完成；`2`：核心输入或显式选择的研究要求未满足；`1`：配置或执行错误。`audit` 未通过也生成审计 HTML；`run` 在无缓存时先构建面板。默认 `data_policy.mode=classic`，未知 ST、未知停牌与缺失收益按经典统计口径披露；`strict` 保留可选的完整数据要求，`proxy` 兼容旧代理配置。核心计算通过、数据覆盖完整及执行模拟可用是分别报告的状态。
@@ -44,7 +44,26 @@ python3 -m fundamental_factor report --run-dir outputs/factor_test_classic
 
 `price_contract.verified/total_return` 只有核验价格处理后才能设为 true，`description` 记录实际复权口径。经典统计不要求先证明覆盖全部公司行动才允许计算价格收益；尚未验证的价格说明会作为审计提示保留，不能将其标为已验证全收益。价格非有限、非正、键冲突与时点问题仍须处理。严格模式下的 `total_return/suspended_total_return` 是用户额外选择的完整全收益校验，不是经典因子测试的通用要求。
 
-经典/代理模式可设置 `return_kind=adjusted_price` 和 `suspension_valuation=previous_adjusted_close`。推荐配置继续使用已修复的复权价格和最近复权收盘估值，`total_return=false` 保留真实口径限制。`missing_returns=report` 时 IC 在已冻结样本中仅使用有效收益对，输出标签覆盖率；任一持仓标签缺失的组当周收益为 NA，不能删除该股票后重新等权。`st_unknown=include` 不代表已完整剔除历史 ST。
+经典/代理模式可设置 `return_kind=adjusted_price` 和 `suspension_valuation=previous_adjusted_close`。推荐配置继续使用已修复的复权价格和最近复权收盘估值，`total_return=false` 保留真实口径限制。`st_unknown=include` 不代表已完整剔除历史 ST。
+
+缺失处理按数据层区分：
+
+| 数据 | 处理 |
+|---|---|
+| 因子 | 非有限值变缺失，真实零值及负值保留；向历史取最近快照，遇明确缺失更新不跨过去取更旧有效值；缺失因子不进入当期分组 |
+| 行业、Barra等控制 | 只要求所选信号版本需要的字段；需要但缺失时从该因子的共同信号样本排除，不填零 |
+| ST、停牌、涨跌停状态 | 保留未知及代理标记；按显式股票池/成交规则处理，不把未知改成正常 |
+| 已知退出停牌 | 依配置使用此前最近一条复权收盘记录估值；该记录缺失或无效时仍保留缺口，代理估值不代表实际成交 |
+| 无法恢复的价格及退市退出值 | 个股收益保持 NA，不向退市后无限延续价格，不假定兑付为零 |
+| IC | 冻结信号后只用有效因子/收益配对；常数或有效配对不足时 IC 为 NA，不插值 |
+| 分组与基准收益 | 推荐 `available_case`：在冻结组内以有效标签对应权重归一计算；保留原目标及缺失权重。`report` 保留旧的任一标签缺失即整组 NA；`error` 保留显式停止语义 |
+| 空组 | 推荐 `empty_groups=cash`：当周整体信号存在、仅某组因并列值为空时现金收益为 0；整周无信号或非空组全缺收益仍为 NA |
+
+推荐方法借鉴 [Qlib `calc_long_short_return`](https://github.com/microsoft/qlib/blob/main/qlib/contrib/eva/alpha.py)：其默认先按信号选出组内股票，再对有效 `label` 求均值。[Alphalens 的清洗器](https://github.com/stefan-jansen/alphalens-reloaded/blob/main/src/alphalens/utils.py)则在分组前删除不完整记录并披露损失比例；本框架保留冻结分组，避免未来标签改变排名。空组现金是本项目显式约定，不声称来自上述框架的统一默认值。
+
+对于原组内目标权重 `w_i`，统计收益为 `sum(w_i*r_i, 有效标签) / sum(w_i, 有效标签)`。`holdings` 中 `target_weight` 不变，另记 `evaluation_weight`；两者不同意味着这是有效样本统计结果，并非冻结持仓的实际现金盈亏。缺失若与退市或亏损相关，仍可能存在选择偏差，需结合缺失权重判断；连续曲线不等于数据已完整。
+
+[Qlib 持仓账本](https://github.com/microsoft/qlib/blob/main/qlib/backtest/account.py)在停牌时保留已有估值；[Zipline 历史价格接口](https://github.com/stefan-jansen/zipline-reloaded/blob/main/src/zipline/data/data_portal.py)允许价格前向延续，但会将证券有效期结束之后恢复为缺失。这类估值延续与统计均值属于不同层次；不能据此把未知退市现金当作已验证价格。
 
 ## 回测逻辑
 
@@ -55,11 +74,11 @@ python3 -m fundamental_factor report --run-dir outputs/factor_test_classic
 3. 每个因子分别取历史最近快照，保留显式缺失更新，不跨过缺失记录寻找旧非空值。所选信号使用其需要的控制字段均可用的共同样本；纯行业模式不要求、筛选或生成实际市值。共同样本是版本比较约定，单独选择原始等权分组与IC不需要行业、市值或Barra。
 4. 原始处理采用中位数 ± `5×1.4826×MAD` 截尾，MAD为零改用1%/99%截尾，再以总体标准差标准化。纯行业中性取行业哑变量及截距的等权OLS残差，等价于行业内去均值；可选市值模式另加个股对数流通市值。全中性再包含20项Barra。QR去除冗余控制列并记录，不删除股票；残差重新标准化。未来收益不参与这些处理。
 5. 按处理后信号的平均排名分位 `p=rank_average/N` 分为 `ceil(10p)`，Q1低、Q10高。同值同组，允许空组，不随机拆零值。每个非空组周初等权，冻结后连接未来收益。
-6. 个股收益 `exit_price_level/entry_level−1`，价格口径见冻结配置。分组收益为冻结权重加权和。退市有真实同尺度终止值时接入，否则保留缺失；经典/代理模式继续输出有效IC和未受影响组合，缺失组保持NA；仅显式严格模式停止。
+6. 个股收益 `exit_price_level/entry_level−1`，价格口径见冻结配置。标签完整时分组收益为冻结权重加权和；推荐配置缺失部分标签时，在原组内按有效标签对应目标权重归一计算统计均值。退市有真实同尺度终止值时接入，否则个股标签保留缺失。导出 `complete` 表示统计收益可计算，`data_complete` 单独表示标签完整，不混淆两者。
 7. 超额为每周组合收益减独立基准，再单独复利；多空为 `r_Q10−r_Q1`，不除以2。另输出共同样本的ALL等权组合，帮助区分因子覆盖与基准差异。报告为费前理论分组收益，披露受限交易比例。
-8. 换手使用入场前漂移权重：`w_old*(1+r_stock)/(1+r_portfolio)`；对旧新持仓并集计算 `sum(abs(w_target−w_drift))`，不除以2。首期建仓计入，不添加末期清仓；多空换手为两腿之和。输出每只股票的目标、漂移及变动权重，包括退出股票。
+8. 换手使用入场前漂移权重：`w_old*(1+r_stock)/(1+r_portfolio)`；对旧新持仓并集计算 `sum(abs(w_target−w_drift))`，不除以2。缺少旧持仓收益时，漂移和该期换手仍为 NA，不用统计收益补算。另列 `target_turnover`，仅比较相邻冻结目标股票权重，供观察信号变化，不能替代漂移换手。首期建仓计入，不添加末期清仓；多空换手为两腿之和。输出每只股票的目标、漂移及变动权重，包括退出股票。
 
-空组收益为NA，净值断线；新连续区段从1展示，不跨断点漂移或拼接。全历史不完整时，累计、年化、回撤和年化换手不可计算；有效周数、波动和胜率仍可列示。常数信号和少于3只股票的子样本不计算IC。真实归零与多空亏损超过本金分别记录，停止虚构后续资本重建。
+推荐配置每周有有效统计收益时，从初始净值 1 连续复利；有效信号下的空组按现金收益 0 处理。非空组全缺收益、整周信号缺失仍保留真实缺口，不能为连线填收益。存在无法计算周次时，全历史累计、年化及回撤不可计算，各可用区段仅作分段展示；年化漂移换手与年化目标换手分别判断是否完整。`empty_groups=missing` 保留旧的空组 NA 行为。常数信号和少于3只股票的子样本不计算IC。真实归零与多空亏损超过本金分别记录，停止虚构后续资本重建。
 
 ## 指标定义
 
@@ -72,7 +91,7 @@ python3 -m fundamental_factor report --run-dir outputs/factor_test_classic
 
 根目录保留 `audit.json`、冻结配置、环境版本、字段映射、覆盖度、预处理诊断、`weeks/universe/controls/features/labels.parquet`、独立基准和未解决收益清单。审计中的 `gate_passed/blocking` 表示核心计算要求，`execution_gate_passed/execution_blocking` 单独记录可选账本要求；面板的 `quality_status` 和覆盖率记录数据完整性。报告并列展示计算状态、ST 未知比例、收益覆盖和可选账本状态。预测模型评分不再输出。
 
-每个 `factors/<name>/` 提供 `ic_weekly.csv`、`ic_summary.csv`、`portfolio_weekly.csv`、`performance.csv`、完整`holdings.parquet`、`annual_performance.csv`、摘要和独立HTML。逐股账本不超过100万行时另存CSV；大型账本仅存Parquet，避免数GB重复导出，摘要记录行数和格式。根 `report.html` 为汇总索引及审计。图表离线渲染，不依赖CDN。源文件和缓存使用首尾各1MiB、大小及mtime的版本指纹，明确不是全文件哈希。重复运行同一配置得出相同数值；实验时间单独记录。
+每个 `factors/<name>/` 提供 `ic_weekly.csv`、`ic_summary.csv`、`portfolio_weekly.csv`、`performance.csv`、完整`holdings.parquet`、`annual_performance.csv`、摘要和独立HTML。缺失统计单列 `data_complete`、`missing_weight`、`evaluation_weight_sum`、`cash_weight`、`return_method`；换手单列 `turnover/annual_turnover` 与 `target_turnover/annual_target_turnover`。逐股账本不超过100万行时另存CSV；大型账本仅存Parquet，避免数GB重复导出，摘要记录行数和格式。根 `report.html` 为汇总索引及审计。图表离线渲染，不依赖CDN。源文件和缓存使用首尾各1MiB、大小及mtime的版本指纹，明确不是全文件哈希。重复运行同一配置得出相同数值；实验时间单独记录。
 
 分类表的 `incentive_amount` 映射仅在输出中修正为 `alternative_incentive_amount.feather`，不修改附件。明细与加工汇总值不混用，`y_5` 不作为原始收益。
 

@@ -71,7 +71,7 @@ class Config:
         defaults = ({"st_unknown": "include", "suspension_unknown": "include", "missing_returns": "report"}
                     if mode == "classic" else
                     {"st_unknown": "error", "suspension_unknown": "error", "missing_returns": "error"})
-        return {"mode": mode, **defaults, "description": ""} | supplied
+        return {"mode": mode, **defaults, "empty_groups": "missing", "description": ""} | supplied
 
     @property
     def digest(self) -> str:
@@ -136,7 +136,9 @@ def load_config(path: str | Path) -> Config:
     if "data_policy" in raw:
         policy = raw["data_policy"]
         choices = {"mode": {"classic", "strict", "proxy"}, "st_unknown": {"error", "include", "exclude"},
-                   "suspension_unknown": {"error", "include", "exclude"}, "missing_returns": {"error", "report"}}
+                   "suspension_unknown": {"error", "include", "exclude"},
+                   "missing_returns": {"error", "report", "available_case"},
+                   "empty_groups": {"missing", "cash"}}
         if not isinstance(policy, dict) or set(policy) - (set(choices) | {"description"}):
             raise ValueError("data_policy 包含未知参数")
         for key, values in choices.items():

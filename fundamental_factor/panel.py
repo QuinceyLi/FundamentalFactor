@@ -305,11 +305,18 @@ def build_panel(config: Config) -> dict:
     rows = []
     for week in weeks.itertuples(index=False):
         group = labels[labels.entry.eq(week.entry)]
-        ready = len(group) > 0 and not group.unresolved.any()
+        n_labels = int((~group.unresolved).sum())
+        data_complete = len(group) > 0 and not group.unresolved.any()
+        available_case = config.data_policy["missing_returns"] == "available_case"
+        ready = n_labels > 0 if available_case else data_complete
         rows.append({"entry": week.entry, "exit": week.exit, "n_stocks": len(group),
-                     "n_labels": int((~group.unresolved).sum()),
+                     "n_labels": n_labels,
                      "label_coverage": float((~group.unresolved).mean()) if len(group) else 0.,
                      "return": float(group["return"].mean()) if ready else np.nan,
+                     "data_complete": data_complete, "complete": ready,
+                     "missing_weight": float(group.unresolved.mean()) if len(group) else np.nan,
+                     "return_method": ("full_sample" if data_complete else "available_case" if ready
+                                       else "missing_return"),
                      "trade_restricted_fraction": float(group.trade_restricted.mean()) if len(group) else np.nan,
                      "trade_restriction_unknown_fraction": float(group.trade_restriction_unknown.mean()) if len(group) else np.nan})
     benchmark = pd.DataFrame(rows)
@@ -317,8 +324,9 @@ def build_panel(config: Config) -> dict:
     if benchmark["return"].isna().any() and manifest["status"] == "ready":
         manifest["status"] = "empty_benchmark"
     manifest["incomplete_benchmark_weeks"] = int(benchmark["return"].isna().sum())
+    manifest["partial_benchmark_weeks"] = int((benchmark["return"].notna() & ~benchmark.data_complete).sum())
     manifest["data_policy"] = config.data_policy
-    if config.data_policy["missing_returns"] == "report":
+    if config.data_policy["missing_returns"] in ("report", "available_case"):
         manifest["quality_status"] = manifest["status"]
         manifest["status"] = "ready"
     files = ["weeks.parquet", "universe.parquet", "controls.parquet", "features.parquet", "labels.parquet",

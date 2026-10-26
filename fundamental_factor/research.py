@@ -122,6 +122,7 @@ def run_research(config: Config) -> dict:
         signals = features[features.factor.eq(factor["name"])].copy()
         tables = evaluate_factor(signals, labels, benchmark, weeks,
                                  missing_returns=config.data_policy["missing_returns"],
+                                 empty_groups=config.data_policy["empty_groups"],
                                  **config.raw["metrics"])
         directory = config.output / "factors" / factor["name"]
         directory.mkdir(parents=True, exist_ok=True)

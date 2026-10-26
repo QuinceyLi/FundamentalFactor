@@ -227,6 +227,10 @@ def audit(config: Config) -> dict:
             result["warnings"].append("停牌端点延续此前复权收盘价估值；这是简化估值，非该日实际成交价或完整现金分红记账。")
         if config.data_policy["missing_returns"] == "report":
             result["warnings"].append("冻结信号后缺失收益不剔除持仓、不补零；IC按可用标签计算并披露覆盖率，不完整组合收益及连续绩效记为缺失。")
+        elif config.data_policy["missing_returns"] == "available_case":
+            result["warnings"].append("有效收益样本统计：先冻结因子分组，再对有收益标签的股票归一化统计权重；基准同口径。原始缺失标签不补零，报告覆盖率和缺失目标权重；该统计组合可能有缺失样本选择偏差，不等同完整目标持仓的实际收益。")
+        if config.data_policy["empty_groups"] == "cash":
+            result["warnings"].append("当周整体信号存在但某十分组因并列为空时，按100%现金、零利息处理；整体信号缺失或非空组收益全部缺失不视为空仓。")
     execution = config.raw.get("execution", {})
     if execution.get("enabled"):
         adjusted_units = execution.get("price_mode", "raw") == "adjusted_units"

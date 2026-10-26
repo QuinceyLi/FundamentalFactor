@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "data_root": "/data/mongo",
-  "output_dir": "../outputs/factor_test_classic",
+  "output_dir": "../outputs/factor_test_available",
   "dataset_kind": "observed",
   "classification_workbook": "/home/liqinghua/.codex/attachments/413d870c-c9f9-4abc-936a-cbe2822ef3a4/因子分类.xlsx",
   "factors": [
@@ -85,7 +85,8 @@
     "mode": "classic",
     "st_unknown": "include",
     "suspension_unknown": "include",
-    "missing_returns": "report",
-    "description": "ST 采用深交所官方简称变更历史，首次事件前及未覆盖上海代码保持未知并纳入研究；停牌采用 GF 的 volume==0 或 close==0，当日全日数据仅作研究过滤。涨跌停用历史板块比例、已知 ST 及除权参考价估计，仅作限制诊断。行业沿用 on_all_temp 历史 class 原始类别；未将今日行业倒填历史，class35 为混合类别。 经典因子统计口径：ST或停牌状态未知不阻断计算、不宣称可成交；有有效价格即保留收益，无法确定的收益保留缺失。"
+    "missing_returns": "available_case",
+    "description": "ST 采用深交所官方简称变更历史，首次事件前及未覆盖上海代码保持未知并纳入研究；停牌采用 GF 的 volume==0 或 close==0，当日全日数据仅作研究过滤。涨跌停用历史板块比例、已知 ST 及除权参考价估计，仅作限制诊断。行业沿用 on_all_temp 历史 class 原始类别；未将今日行业倒填历史，class35 为混合类别。 经典因子统计口径：ST或停牌状态未知不阻断计算、不宣称可成交；有有效价格即保留收益，无法确定的收益保留缺失。 组合和基准采用Qlib式有效收益样本均值；冻结目标权重与收益统计权重分别记录。并列形成的空组按零利息现金处理；全部信号缺失或非空组全缺收益不补零。",
+    "empty_groups": "cash"
   }
 }

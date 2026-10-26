@@ -47,6 +47,7 @@ LABELS = {
     "nw_lower": "NW 95%下限", "nw_upper": "NW 95%上限", "nw_status": "NW状态",
     "total_return": "总收益", "annual_return": "年化收益", "annual_volatility": "年化波动率",
     "information_ratio": "信息比率", "max_drawdown": "最大回撤", "annual_turnover": "年化换手率（双边）",
+    "annual_target_turnover": "年化目标换手率（双边）",
     "excess_total_return": "超额总收益", "excess_annual_return": "超额年化收益",
     "excess_annual_volatility": "超额年化波动率", "excess_information_ratio": "超额信息比率",
     "excess_win_rate": "超额胜率", "excess_max_drawdown": "超额最大回撤", "status": "状态",
@@ -67,6 +68,11 @@ LABELS = {
     "n_labels": "有效收益标签数", "label_coverage": "收益标签覆盖率",
     "unknown_st_count": "ST 未知股票数", "unknown_st_fraction": "ST 未知比例",
     "trade_restriction_unknown_fraction": "交易限制未知比例",
+    "incomplete_label_weeks": "含缺失标签周数", "mean_missing_weight": "平均缺失标签目标权重",
+    "max_missing_weight": "最高缺失标签目标权重", "mean_evaluation_weight": "平均统计权重合计",
+    "data_complete": "标签完整", "missing_weight": "缺失标签目标权重",
+    "evaluation_weight_sum": "统计权重合计", "cash_weight": "现金目标权重",
+    "return_method": "收益统计方法", "target_turnover": "目标双边换手率",
 }
 PERCENT = {
     "ic_mean", "ic_std", "win_rate", "nw_lower", "nw_upper", "total_return", "annual_return",
@@ -77,6 +83,8 @@ PERCENT = {
     "mean_cash_weight", "max_cash_weight",
     "label_coverage",
     "unknown_st_fraction", "trade_restriction_unknown_fraction",
+    "annual_target_turnover", "target_turnover", "mean_missing_weight", "max_missing_weight",
+    "mean_evaluation_weight", "missing_weight", "evaluation_weight_sum", "cash_weight",
 }
 PERFORMANCE_COLUMNS = ["portfolio", "n_periods", "total_return", "annual_return", "annual_volatility",
                        "information_ratio", "win_rate", "max_drawdown", "annual_turnover", "excess_total_return",
@@ -393,11 +401,41 @@ def _definitions(config: dict) -> str:
             items.append("停牌状态缺失时的处理：" + {"include": "保留未知标记并纳入理论样本；仅有状态缺失、但价格有效时不作收益缺失。",
                          "exclude": "按入场日已冻结规则排除并披露覆盖率。", "error": "按显式配置停止构建股票池。"}[suspension])
             items.append("完整历史 ST、完整交易例外和逐笔公司行动不是因子统计的统一门槛；缺失终止收益只影响持有该股票的组合与对应标签。")
+    if policy.get("missing_returns") == "available_case":
+        items[15] = ("退出停牌按配置沿用最近复权收盘估值；该估值不是成交价。未知退市退出价值及无法解决的缺价保持缺失，"
+                     "不向退市后延续价格，也不把未观察到的个股收益填成零。")
+        items[16] = ("有效样本统计：先冻结排名、分组和目标权重 target_weight，再在原组内对有效收益计算统计权重 "
+                     "evaluation_weight=target_weight/有效收益对应目标权重之和；缺失标签股票仍保留在持仓明细，统计权重为零。"
+                     "因此统计收益可计算不代表全部持仓收益已知；统计权重与冻结持仓权重不同，可能产生非随机缺失导致的选择偏差。")
+        items = [item for item in items if not item.startswith("IC 仅在已冻结信号中使用有效收益配对")]
+        items.append("IC 仅用有效因子和收益配对，不填充缺失 IC；缺失收益不改变当期股票排名、分组或冻结目标权重。")
+        items.append("独立基准采用相同的有效收益统计规则，并单列缺失标签及权重；超额收益仍为组收益减基准收益。")
+        items.append("每周统计收益均可计算时，从初始净值 1 连续复利；非空组全无有效收益、整周信号缺失仍为 NA，"
+                     "保留明确缺口，不能为了连线虚构收益。真实亏损归零后不重建本金。")
+        items.append("漂移换手需要每只旧持仓的实际收益，缺失时仍为 NA，不使用统计收益代替；另列目标双边换手，"
+                     "仅比较相邻冻结目标股票权重，不含收益漂移，不能冒充实际成交或漂移换手。")
+        items.append("Q10−Q1 的统计权重合计为两腿毛权重之和，最高为 200%；现金比例和缺失权重为两腿比例的平均值，"
+                     "分母不同，不能将这些字段相加解释为单个多头账户的资产配置。")
+    if policy.get("empty_groups") == "cash":
+        if policy.get("missing_returns") != "available_case":
+            items[16] = ("无法计算的非空组收益不补零、不跨缺口拼接净值。各连续区段从 1 展示；"
+                         "存在内部缺口时，全期间累计收益、年化收益和最大回撤为 N/A。")
+        items.append("空组现金约定：当周整体信号有效但某分组因并列值为空时，该组以现金为目标，周收益为 0；"
+                     "这是一项显式组合约定。整周无信号或非空组全部缺失收益不属于空组现金，不补零。")
     if "full" in variants:
         items.append("全中性使用的风险暴露：" + "、".join(str(field) for field in risk_fields) + "。")
     if backtest.get("start_date") or backtest.get("end_date"):
         items.append(f"配置的信号入场日期范围：{backtest.get('start_date') or '不限'} 至 {backtest.get('end_date') or '不限'}；实际首末持有期见样本信息。")
-    return _details("指标定义与回测口径", "<ol>" + "".join(f"<li>{_escape(item)}</li>" for item in items) + "</ol>", True)
+    sources = ""
+    if policy.get("missing_returns") == "available_case":
+        sources = ('<p class="caption">方法参考：<a href="https://github.com/microsoft/qlib/blob/main/qlib/contrib/eva/alpha.py">'
+                   'Qlib calc_long_short_return</a> 默认先按预测信号选组，再对有效 label 求均值；'
+                   '<a href="https://github.com/stefan-jansen/alphalens-reloaded/blob/main/src/alphalens/utils.py">'
+                   'Alphalens get_clean_factor</a> 则先删除不完整的因子与收益记录再分组。'
+                   '本项目采用分组后有效收益统计，保留原始分组和缺失披露；空组现金是本项目配置约定。'
+                   '<a href="https://github.com/microsoft/qlib/blob/main/qlib/backtest/account.py">Qlib 持仓估值</a>'
+                   '在停牌时保留已有价格，这与统计均值计算属于不同层次；本报告不是持续现金账户的可实现全收益。</p>')
+    return _details("指标定义与回测口径", "<ol>" + "".join(f"<li>{_escape(item)}</li>" for item in items) + "</ol>" + sources, True)
 
 
 def _prioritize_diagnostics(frame: pd.DataFrame) -> pd.DataFrame:
@@ -429,6 +467,15 @@ def _portfolio_diagnostics(frame: pd.DataFrame) -> pd.DataFrame:
                      "missing_return_weeks": int((~np.isfinite(returns)).sum()),
                      "mean_stocks": counts.mean(), "min_stocks": counts.min(), "max_stocks": counts.max(),
                      "mean_restricted_fraction": restricted.mean(), "max_restricted_fraction": restricted.max()})
+        if "data_complete" in block:
+            rows[-1]["incomplete_label_weeks"] = int((~_true_flags(block.data_complete) & counts.gt(0)).sum())
+        if "missing_weight" in block:
+            missing_weight = pd.to_numeric(block.missing_weight, errors="coerce")
+            rows[-1].update(mean_missing_weight=missing_weight.mean(), max_missing_weight=missing_weight.max())
+        if "evaluation_weight_sum" in block:
+            rows[-1]["mean_evaluation_weight"] = pd.to_numeric(block.evaluation_weight_sum, errors="coerce").mean()
+        if "cash_weight" in block:
+            rows[-1]["mean_cash_weight"] = pd.to_numeric(block.cash_weight, errors="coerce").mean()
     return pd.DataFrame(rows)
 
 
@@ -650,6 +697,10 @@ def _quality_disclosure(config: dict, audit: dict, manifest: dict, usable: bool)
         return ""
     rows = [{"项目": "核心因子统计", "本次状态": "已完成" if usable else "尚未完成", "影响":
              "可选筛选和执行数据缺项不会自动中止核心统计；时点、键、价格及产物一致性仍须核验。"}]
+    available_case = config.get("data_policy", {}).get("missing_returns") == "available_case"
+    if available_case:
+        rows.append({"项目": "缺失收益统计规则", "本次状态": "冻结分组后按有效收益统计", "影响":
+                     "目标权重保持不变；统计权重在有效标签内归一，可能产生选择偏差。收益可计算与标签完整分别记录。"})
     if manifest.get("status") == "ready":
         base_count = manifest.get("base_rows", 0)
         unknown_st = manifest.get("unknown_st_base_rows")
@@ -661,13 +712,17 @@ def _quality_disclosure(config: dict, audit: dict, manifest: dict, usable: bool)
                          "影响": "保留未知标记；价格有效时可计算理论收益，价格缺失时单独披露，不把状态未知当成正常成交。"})
         if _finite(manifest.get("label_coverage")):
             rows.append({"项目": "未来收益标签覆盖率", "本次状态": f"{manifest['label_coverage']:.5%}",
-                         "影响": "IC 使用已冻结样本中的有效配对，缺失标签不改变当期分组及权重。"})
+                         "影响": "IC 使用已冻结样本中的有效配对，缺失标签不改变当期分组及目标权重。"})
         if _finite(manifest.get("unresolved_labels")):
             rows.append({"项目": "未解决收益股周", "本次状态": f"{int(manifest['unresolved_labels']):,}",
-                         "影响": "受影响组合当周收益为缺失，未受影响组合和有效 IC 继续计算；不以零收益替代。"})
+                         "影响": ("原组保留股票及缺失标记，使用其余有效收益统计；非空组全部缺失时仍为 NA，未观察个股收益不补零。" if available_case else
+                                   "受影响组合当周收益为缺失，未受影响组合和有效 IC 继续计算；不以零收益替代。")})
         if _finite(manifest.get("incomplete_benchmark_weeks")):
-            rows.append({"项目": "基准收益不完整周数", "本次状态": f"{int(manifest['incomplete_benchmark_weeks']):,}",
-                         "影响": "这些周次的基准和相应超额收益缺失；组合自身有完整收益时仍可展示。"})
+            rows.append({"项目": "基准收益无法计算周数", "本次状态": f"{int(manifest['incomplete_benchmark_weeks']):,}",
+                         "影响": "这些周次的基准和相应超额收益缺失；组合自身收益可计算时仍可展示。"})
+        if _finite(manifest.get("partial_benchmark_weeks")):
+            rows.append({"项目": "基准标签不完整但收益可计算周数", "本次状态": f"{int(manifest['partial_benchmark_weeks']):,}",
+                         "影响": "有效标签按相同统计规则汇总；缺失股票及目标权重另报，连续基准净值不代表标签已全部完整。"})
     execution = config.get("execution", {})
     requested = execution.get("enabled", False)
     execution_passed = audit.get("execution_gate_passed", True)
@@ -757,6 +812,11 @@ def _factor_report(root: Path, folder: Path, factor: dict, config: dict, audit: 
             nav.append({"name": group, "points": _nav_points(group_frame, "nav")})
             excess.append({"name": group, "points": _nav_points(group_frame, "excess_nav")})
         nav_caption = "每周组内等权，净值起点为 1；方块表示重新归一的连续区段，后续区段为虚线。空组或收益缺口断线，未跨缺口拼接。"
+        if config.get("data_policy", {}).get("missing_returns") == "available_case":
+            nav_caption = ("冻结分组后按有效收益计算统计均值，每周收益可计算时从 1 连续复利。"
+                           "缺失个股收益不补零，统计权重可能不同于冻结目标权重；非空组全缺或整周无信号仍显示缺口。")
+            if config.get("data_policy", {}).get("empty_groups") == "cash":
+                nav_caption += "整体信号有效时的空组按现金收益 0 处理。"
         sections.append(charts.chart("十分组组合表现", nav, caption=nav_caption))
         sections.append(charts.chart("十分组组合超额表现", excess, caption="逐周组合收益减配置股票池的等权基准收益再复利；超额净值不是组合净值与基准净值的比值。" + nav_caption))
         spread = portfolio[portfolio.portfolio == "Q10-Q1"]
@@ -772,13 +832,21 @@ def _factor_report(root: Path, folder: Path, factor: dict, config: dict, audit: 
             exbars.append({"date": group, "value": _number(row.excess_annual_return.iloc[0]) if len(row) else None})
         sections.append('<div class="grid-two">' + charts.chart("十分组年化收益", [{"name": "年化收益", "points": bars}], kind="category", unit="percent")
                         + charts.chart("十分组超额年化收益", [{"name": "超额年化收益", "points": exbars}], kind="category", unit="percent") + "</div>")
-        sections.append(render_table(performance, columns=PERFORMANCE_COLUMNS))
+        performance_columns = PERFORMANCE_COLUMNS.copy()
+        if "annual_target_turnover" in performance:
+            performance_columns.insert(performance_columns.index("annual_turnover") + 1, "annual_target_turnover")
+        sections.append(render_table(performance, columns=performance_columns))
         sections.append(_details("分组股票数量、空组与交易受限诊断", render_table(_portfolio_diagnostics(portfolio), 20)
                                  + '<p class="caption">交易受限比例为当周组内股票数占比的周度均值及单周最高值；这不是实际未成交率。Q10−Q1 股票数为两腿股票数之和。共同样本 ALL 篮子未混入十分组表。</p>', True))
+        if "missing_weight" in portfolio:
+            sections.append(_details("缺失标签权重与统计口径逐周明细", render_table(portfolio, 30,
+                ["entry", "portfolio", "n_stocks", "n_labels", "label_coverage", "data_complete", "missing_weight",
+                 "evaluation_weight_sum", "cash_weight", "return_method", "turnover", "target_turnover"])
+                + '<p class="caption">缺失标签目标权重按冻结持仓计算。统计权重仅用于有效样本均值，不能反推实际调仓；漂移换手缺失仍保持 NA。</p>'))
         annual = _csv(folder / "annual_performance.csv")
         if not annual.empty and "variant" in annual:
             selected = annual[(annual.variant == variant) & annual.portfolio.isin(PORTFOLIOS)]
-            sections.append(_details("年度分组与多空表现", render_table(selected, 300, ["year"] + PERFORMANCE_COLUMNS)))
+            sections.append(_details("年度分组与多空表现", render_table(selected, 300, ["year"] + performance_columns)))
     sections.append(_execution_section(folder, factor, charts))
     sections.append("<h2>失败、缺口与交易限制</h2>")
     failures = _csv(root / "preprocessing_failures.csv")
