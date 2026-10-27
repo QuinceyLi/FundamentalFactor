@@ -28,6 +28,12 @@ def save_result_tables(directory, tables, holdings_csv_limit=1_000_000):
             table.to_parquet(directory / "holdings.parquet", index=False)
             formats.append("parquet")
         artifacts[name] = {"rows": len(table), "formats": formats}
+        # Neutral names describe both weekly and monthly data. Historical names
+        # remain available for existing notebooks and report readers.
+        if name in ("ic_weekly", "portfolio_weekly"):
+            alias = name.replace("_weekly", "_periodic")
+            table.to_csv(directory / f"{alias}.csv", index=False)
+            artifacts[alias] = {"rows": len(table), "formats": ["csv"]}
     return artifacts
 
 
@@ -115,7 +121,9 @@ def run_research(config: Config) -> dict:
                   "definition": "过滤后配置股票池等权；独立于因子和Barra覆盖",
                   "exchanges": config.exchanges,
                   **performance_metrics(benchmark["return"], annualization=config.raw["metrics"]["annualization"])},
-              "sample": {"weeks": len(weeks), "signal_start": manifest["signal_start"],
+              "sample": {"weeks": len(weeks), "periods": len(weeks),
+                         "rebalance_frequency": config.rebalance_frequency,
+                         "sample_policy": config.sample_policy, "signal_start": manifest["signal_start"],
                          "signal_end": manifest["signal_end"], "holding_start": manifest["holding_start"],
                          "holding_end": manifest["holding_end"]}}
     for factor in config.factors:
@@ -123,6 +131,7 @@ def run_research(config: Config) -> dict:
         tables = evaluate_factor(signals, labels, benchmark, weeks,
                                  missing_returns=config.data_policy["missing_returns"],
                                  empty_groups=config.data_policy["empty_groups"],
+                                 sample_policy=config.sample_policy, variants=config.variants,
                                  **config.raw["metrics"])
         directory = config.output / "factors" / factor["name"]
         directory.mkdir(parents=True, exist_ok=True)
@@ -135,7 +144,13 @@ def run_research(config: Config) -> dict:
                    for row in main.itertuples(index=False)}
         card = {"name": factor["name"], "label": factor["label"],
                 "output_dir": str(directory.relative_to(config.output)),
-                "sample": {"weeks": len(weeks), "signal_rows": len(signals.drop_duplicates(["entry", "exit", "code"])),
+                "sample": {"weeks": len(weeks), "periods": len(weeks),
+                           "rebalance_frequency": config.rebalance_frequency,
+                           "sample_policy": config.sample_policy,
+                           "signal_rows": len(signals.drop_duplicates(["entry", "exit", "code"])),
+                           "variant_signal_rows": {v: int(signals.variant.eq(v).sum()) for v in config.variants},
+                           "mean_variant_coverage": {v: float(rows[f"variant_{v}_coverage"].mean())
+                                                     for v in config.variants if f"variant_{v}_coverage" in rows},
                            "mean_raw_coverage": rows.raw_coverage.mean(),
                            "mean_common_coverage": rows.common_coverage.mean(),
                            "signal_start": manifest["signal_start"], "signal_end": manifest["signal_end"],
@@ -143,6 +158,10 @@ def run_research(config: Config) -> dict:
                 "summary": summary}
         card["execution"] = dict(execution_card)
         card["variants"] = config.variants
+        card["sample_policy"] = config.sample_policy
+        card["rebalance_frequency"] = config.rebalance_frequency
+        card["preprocess"] = {"winsorize": config.raw["preprocess"].get("winsorize", True),
+                              "standardize": config.raw["preprocess"].get("standardize", True)}
         card["artifacts"] = artifacts
         card["data_policy"] = config.data_policy
         card["price_contract"] = config.raw.get("price_contract", {})
@@ -173,6 +192,8 @@ def run_research(config: Config) -> dict:
                     table.to_parquet(directory / f"execution_{name}.parquet", index=False)
                 else:
                     table.to_csv(directory / f"execution_{name}.csv", index=False)
+                    if name == "weekly":
+                        table.to_csv(directory / "execution_periodic.csv", index=False)
             incomplete = int(executed["weekly"].quality_status.ne("ok").sum())
             definition = ("复权价格单位、代理成交限制、现金约束、费税与冲击为零；单位数非实际股数，"
                           "不重复记分红送转，实际持有退市未解决的账户收益记缺失；附加敏感性账本"

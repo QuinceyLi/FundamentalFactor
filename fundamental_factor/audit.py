@@ -25,9 +25,10 @@ def source_columns(config: Config) -> dict[str, list[str]]:
     price = config.raw["price_contract"]
     classic = config.data_policy["mode"] == "classic"
     history = ["date", "code"]
-    if config.requires_industry:
+    history_available = optional_columns(config.source("history"))
+    if config.requires_industry and (not config.optional_control_sources or "industry" in history_available):
         history.append("industry")
-    if config.requires_float_mcap:
+    if config.requires_float_mcap and (not config.optional_control_sources or "float_mcap" in history_available):
         history.append("float_mcap")
     path = config.source("history")
     if not classic or "is_st" in optional_columns(path):
@@ -43,7 +44,11 @@ def source_columns(config: Config) -> dict[str, list[str]]:
         "terminal": ["date", "available_date", "code", "terminal_value"],
     }
     if config.requires_risk:
-        result["risk"] = ["date", "code"] + RISK_FIELDS
+        exposure_columns = RISK_FIELDS
+        if config.optional_control_sources:
+            available = optional_columns(config.source("risk"))
+            exposure_columns = [column for column in RISK_FIELDS if column in available]
+        result["risk"] = ["date", "code"] + exposure_columns
     if config.raw.get("execution", {}).get("enabled"):
         result["execution_status"] = ["date", "code", "suspended", "limit_up", "limit_down"]
         if config.raw["execution"].get("price_mode", "raw") == "raw":
@@ -111,11 +116,18 @@ def audit(config: Config) -> dict:
     optional.add("execution_terminal")
     if classic and not config.requires_industry and not config.requires_float_mcap:
         optional.add("history")
+    if config.optional_control_sources:
+        optional.update({"history", "risk"})
+        result["warnings"].append("各信号版本独立取样：原始版本不要求行业或Barra；控制数据缺失仅影响需要它们的中性化版本。版本间表现差异也可能来自样本差异。")
 
     def blocking(name: str, message: str) -> None:
         result["execution_blocking" if name in execution_names else "blocking"].append(message)
 
     sets, quote_dates, stock_codes, earliest_listing = {}, None, None, None
+    primary_sets = {}
+    factor_sources = {factor["source"] for factor in config.factors}
+    configured_end = config.raw["backtest"].get("end_date")
+    attribute_check_end = pd.Timestamp(configured_end) if configured_end else None
     requirements = source_columns(config)
     for name, required in requirements.items():
         path = config.source(name)
@@ -124,11 +136,19 @@ def audit(config: Config) -> dict:
                 blocking(name, f"缺少 {name} 数据入口或文件")
             elif classic:
                 result["warnings"].append(f"可选 {name} 数据未提供；保留未知状态或缺失收益披露，不阻断因子统计。")
+                if config.optional_control_sources and name in ("history", "risk"):
+                    result["warnings"].append(f"{name} 控制数据不可用：需要这些字段的中性化版本将记录无有效样本；原始版本继续。")
             continue
         try:
             available = columns(path)
             if missing := set(required) - set(available):
                 raise ValueError(f"missing columns {sorted(missing)}")
+            if config.optional_control_sources and name in ("history", "risk"):
+                expected = (RISK_FIELDS if name == "risk" else
+                            (["industry"] if config.requires_industry else []) +
+                            (["float_mcap"] if config.requires_float_mcap else []))
+                if absent := set(expected) - set(available):
+                    result["warnings"].append(f"{name} 缺少控制字段 {sorted(absent)}；仅影响需要这些字段的版本，原始版本不因此删除股票。")
             selected = required + (["is_a_share"] if name == "stocks" and "is_a_share" in available else [])
             frame = read_frame(path, selected, nullable_booleans=(name == "execution_status" or
                                 relaxed and name in ("history", "status")))
@@ -159,6 +179,19 @@ def audit(config: Config) -> dict:
                                            "max": float(values[finite].max()) if finite.any() else None}
             if name == "quotes":
                 quote_dates = pd.DatetimeIndex(frame.date.unique()).sort_values()
+                price_end = quote_dates.max()
+                attribute_check_end = (min(attribute_check_end, price_end)
+                                       if attribute_check_end is not None else price_end)
+                result["stock_attribute_check_end"] = attribute_check_end
+            if name == "quotes" or name in factor_sources:
+                # Old snapshots may remain valid at entry, but records arriving
+                # after the last possible holding endpoint cannot enter this run.
+                # A recently refreshed factor file must not make an older price
+                # history require attributes for future-only securities.
+                relevant = frame if attribute_check_end is None else frame[frame.date.le(attribute_check_end)]
+                primary_sets[name] = set(relevant.code)
+                info["codes_through_holding_end"] = len(primary_sets[name])
+                del relevant
             if name == "stocks":
                 stock_codes = sets[name]
                 earliest_listing = frame.listing_date.min()
@@ -198,7 +231,7 @@ def audit(config: Config) -> dict:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             blocking(name, f"{name} 接入校验失败：{exc}")
     if stock_codes is not None:
-        primary = set().union(*(sets.get(f["source"], set()) for f in config.factors), sets.get("quotes", set()))
+        primary = set().union(*(primary_sets.get(f["source"], set()) for f in config.factors), primary_sets.get("quotes", set()))
         if config.exchanges is not None:
             primary = {code for code in primary if code.rsplit(".", 1)[-1] in config.exchanges}
         missing = sorted(primary - stock_codes)

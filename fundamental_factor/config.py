@@ -52,6 +52,20 @@ class Config:
         return list(self.raw.get("neutralization", {}).get("variants", default))
 
     @property
+    def sample_policy(self) -> str:
+        # Missing settings retain the sample definition of existing frozen runs.
+        return self.raw.get("neutralization", {}).get("sample_policy", "common")
+
+    @property
+    def rebalance_frequency(self) -> str:
+        return self.raw.get("backtest", {}).get("rebalance_frequency", "weekly")
+
+    @property
+    def optional_control_sources(self) -> bool:
+        return (self.data_policy["mode"] == "classic" and self.sample_policy == "independent"
+                and "raw" in self.variants)
+
+    @property
     def requires_industry(self) -> bool:
         return any(variant != "raw" for variant in self.variants)
 
@@ -111,18 +125,29 @@ def load_config(path: str | Path) -> Config:
             raise ValueError(f"因子 {name} 缺少 column 或有效 source 映射")
         factor.setdefault("label", name)
         names.add(name)
+    frequency = raw.get("backtest", {}).get("rebalance_frequency", "weekly")
+    if frequency not in ("weekly", "monthly"):
+        raise ValueError("backtest.rebalance_frequency 必须为 weekly 或 monthly")
+    metric_defaults = DEFAULT_METRICS if frequency == "weekly" else {"annualization": 12, "nw_lag": 3}
+    extra_options = {"backtest": {"rebalance_frequency"}, "preprocess": {"winsorize", "standardize"}}
     for key, defaults in (("backtest", DEFAULT_BACKTEST), ("preprocess", DEFAULT_PREPROCESS),
-                          ("metrics", DEFAULT_METRICS)):
+                          ("metrics", metric_defaults)):
         supplied = raw.get(key, {})
-        if set(supplied) - set(defaults):
-            raise ValueError(f"未知 {key} 参数：{sorted(set(supplied) - set(defaults))}")
+        allowed = set(defaults) | extra_options.get(key, set())
+        if set(supplied) - allowed:
+            raise ValueError(f"未知 {key} 参数：{sorted(set(supplied) - allowed)}")
         raw[key] = defaults | supplied
+    if "rebalance_frequency" in raw["backtest"] and raw["metrics"]["annualization"] != metric_defaults["annualization"]:
+        raise ValueError(f"{frequency} 调仓的 metrics.annualization 必须为 {metric_defaults['annualization']}")
     for key, value in (("min_listing_sessions", raw["backtest"]["min_listing_sessions"]),
                        ("annualization", raw["metrics"]["annualization"]),
                        ("nw_lag", raw["metrics"]["nw_lag"])):
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"{key} must be a positive integer")
     pre = raw["preprocess"]
+    for flag in ("winsorize", "standardize"):
+        if flag in pre and not isinstance(pre[flag], bool):
+            raise ValueError(f"preprocess.{flag} must be boolean")
     for key in ("mad_multiplier", "mad_normalizer", "rank_tolerance"):
         if not isinstance(pre[key], (int, float)) or not 0 < pre[key] < float("inf"):
             raise ValueError(f"preprocess.{key} must be finite and positive")
@@ -151,9 +176,11 @@ def load_config(path: str | Path) -> Config:
             raise ValueError("proxy data_policy 需要 description 说明")
     if "neutralization" in raw:
         settings = raw["neutralization"]
-        if (not isinstance(settings, dict) or not settings or set(settings) - {"include_float_mcap", "variants"}
+        if (not isinstance(settings, dict) or not settings or set(settings) - {"include_float_mcap", "variants", "sample_policy"}
                 or "include_float_mcap" in settings and not isinstance(settings["include_float_mcap"], bool)):
-            raise ValueError("neutralization 仅支持 include_float_mcap 与 variants")
+            raise ValueError("neutralization 仅支持 include_float_mcap、variants 与 sample_policy")
+        if settings.get("sample_policy", "common") not in ("common", "independent"):
+            raise ValueError("neutralization.sample_policy 必须为 common 或 independent")
         if "variants" in settings:
             variants = settings["variants"]
             if (not isinstance(variants, list) or not variants or

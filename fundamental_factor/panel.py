@@ -30,17 +30,41 @@ def _status_frame(config: Config) -> pd.DataFrame:
     return status
 
 
+def rebalance_calendar(calendar: pd.Series, start: pd.Timestamp, end: pd.Timestamp,
+                       frequency: str = "weekly") -> pd.DataFrame:
+    """First market session of each complete weekly or monthly holding period.
+
+    Group the entire supplied market calendar before applying the requested
+    range: a start date in the middle of a period must not invent a rebalance.
+    A period is emitted only when its next rebalance open is within the range.
+    """
+    if frequency not in {"weekly", "monthly"}:
+        raise ValueError("rebalance frequency must be weekly or monthly")
+    days = calendar.sort_values().drop_duplicates()
+    grouping = "W-SUN" if frequency == "weekly" else "M"
+    first = days.groupby(days.dt.to_period(grouping)).min().sort_values().reset_index(drop=True)
+    first = first[(first >= pd.Timestamp(start)) & (first <= pd.Timestamp(end))].reset_index(drop=True)
+    periods = pd.DataFrame({"entry": first.iloc[:-1].to_numpy(), "exit": first.iloc[1:].to_numpy()})
+    periods["cutoff"] = periods.entry - pd.Timedelta(nanoseconds=1)
+    if periods.empty:
+        label = "周度" if frequency == "weekly" else "月度"
+        raise DataGateError(f"没有完整的{label}开盘到开盘持有期")
+    return periods
+
+
 def weekly_calendar(calendar: pd.Series, start: pd.Timestamp, end: pd.Timestamp,
                     study: dict | None = None) -> pd.DataFrame:
-    days = calendar.sort_values().drop_duplicates()
-    # Group the full calendar first: slicing midweek must not invent a rebalance day.
-    first = days.groupby(days.dt.to_period("W-SUN")).min().sort_values().reset_index(drop=True)
-    first = first[(first >= pd.Timestamp(start)) & (first <= pd.Timestamp(end))].reset_index(drop=True)
-    weeks = pd.DataFrame({"entry": first.iloc[:-1].to_numpy(), "exit": first.iloc[1:].to_numpy()})
-    weeks["cutoff"] = weeks.entry - pd.Timedelta(nanoseconds=1)
-    if weeks.empty:
-        raise DataGateError("没有完整的周度开盘到开盘持有期")
-    return weeks
+    """Backward-compatible weekly calendar entry point."""
+    return rebalance_calendar(calendar, start, end, frequency="weekly")
+
+
+def _panel_calculation_version(config: Config) -> int:
+    # Keep existing weekly/common/preprocessed caches reproducible. A new
+    # sampling, transformation or frequency contract cannot reuse version 3.
+    preprocessing = config.raw["preprocess"]
+    legacy = (config.rebalance_frequency == "weekly" and config.sample_policy == "common"
+              and preprocessing.get("winsorize", True) and preprocessing.get("standardize", True))
+    return 3 if legacy else 4
 
 
 def base_universe(config: Config, weeks: pd.DataFrame) -> pd.DataFrame:
@@ -78,12 +102,14 @@ def base_universe(config: Config, weeks: pd.DataFrame) -> pd.DataFrame:
         grid = asof_snapshot(grid, history, "history")
     if "industry" not in grid:
         grid["industry"] = pd.NA
+    if config.optional_control_sources and config.requires_float_mcap and "float_mcap" not in grid:
+        grid["float_mcap"] = np.nan
     grid["short_listing"] = grid.listing_sessions.lt(config.raw["backtest"]["min_listing_sessions"])
     # A proxy study may retain unknown ST states, but never relabel them clean.
     unresolved_st = grid.is_st.isna() & ~grid.short_listing
     grid["is_st_unknown"] = grid.is_st.isna()
     if unresolved_st.any() and policy["st_unknown"] == "error":
-        raise DataGateError(f"{int(unresolved_st.sum())} 条股票周次缺少截点历史ST状态")
+        raise DataGateError(f"{int(unresolved_st.sum())} 条股票期次缺少截点历史ST状态")
     status = _status_frame(config)[["date", "code", "suspended"]]
     grid = grid.merge(status.rename(columns={"date": "entry", "suspended": "entry_suspended"}),
                       on=["entry", "code"], how="left", validate="many_to_one")
@@ -104,9 +130,20 @@ def signal_panel(config: Config, weeks: pd.DataFrame, base: pd.DataFrame | None 
     include_float_mcap = config.include_float_mcap
     base = base_universe(config, weeks) if base is None else base
     if config.requires_risk:
-        risk = read_frame(config.source("risk"), ["date", "code"] + RISK_FIELDS)
-        controls = asof_snapshot(base, risk, "risk")
-        del risk
+        risk_path = config.source("risk")
+        optional_controls = config.optional_control_sources
+        if optional_controls and (risk_path is None or not risk_path.is_file()):
+            controls = base.copy()
+            controls["risk_date"] = pd.NaT
+        else:
+            available = set(columns(risk_path)) if optional_controls else set(RISK_FIELDS)
+            fields = [field for field in RISK_FIELDS if field in available]
+            risk = read_frame(risk_path, ["date", "code"] + fields)
+            controls = asof_snapshot(base, risk, "risk")
+            del risk
+        for field in RISK_FIELDS:
+            if field not in controls:
+                controls[field] = np.nan
         controls[RISK_FIELDS] = controls[RISK_FIELDS].replace([np.inf, -np.inf], np.nan)
     else:
         controls = base.copy()
@@ -143,15 +180,21 @@ def signal_panel(config: Config, weeks: pd.DataFrame, base: pd.DataFrame | None 
         counts["common_coverage"] = counts.common_count / denominator
         counts["unknown_st_fraction"] = counts.unknown_st_count / denominator
         counts["unknown_suspension_fraction"] = counts.unknown_suspension_count / denominator
-        common = joined[joined.common_ok].copy()
-        zero = common.value.eq(0).groupby(common.entry).mean()
-        ties = common.groupby("entry").value.apply(lambda s: s.duplicated(keep=False).mean())
+        selected = joined[joined.common_ok if config.sample_policy == "common" else joined.factor_ok].copy()
+        zero = selected.value.eq(0).groupby(selected.entry).mean()
+        ties = selected.groupby("entry").value.apply(lambda s: s.duplicated(keep=False).mean())
         counts["zero_fraction"] = zero.reindex(counts.index)
         counts["tie_fraction"] = ties.reindex(counts.index)
-        coverage.append(counts.reset_index())
-        signals, diagnostics = prepare_signals(common, config.raw["preprocess"],
+        signals, diagnostics = prepare_signals(selected, config.raw["preprocess"],
                                                include_float_mcap=include_float_mcap,
-                                               variants=config.variants)
+                                               variants=config.variants,
+                                               sample_policy=config.sample_policy)
+        for variant in config.variants:
+            variant_counts = signals.loc[signals.variant.eq(variant)].groupby("entry").size()
+            counts[f"variant_{variant}_count"] = variant_counts.reindex(counts.index, fill_value=0)
+            counts[f"variant_{variant}_coverage"] = counts[f"variant_{variant}_count"] / denominator
+        counts["sample_policy"] = config.sample_policy
+        coverage.append(counts.reset_index())
         diagnostics["factor"] = factor["name"]
         failures.append(diagnostics)
         # Controls are cached once; avoid writing 20 exposures six times for two factors.
@@ -266,7 +309,7 @@ def build_panel(config: Config) -> dict:
     if settings["end_date"]:
         end = min(end, pd.Timestamp(settings["end_date"]))
     calendar = read_frame(config.source("calendar"), ["date"])
-    weeks = weekly_calendar(calendar.date, start, end)
+    weeks = rebalance_calendar(calendar.date, start, end, frequency=config.rebalance_frequency)
     execution = config.raw.get("execution", {})
     if (config.data_policy["mode"] != "classic" and execution.get("enabled")
             and "coverage_start" in execution and (
@@ -274,6 +317,9 @@ def build_panel(config: Config) -> dict:
             or pd.Timestamp(execution["coverage_end"]) < weeks.exit.max())):
         raise DataGateError("执行账本已核实覆盖期不足完整持有期；不可用缺失事件冒充无公司行动")
     weeks.to_parquet(config.output / "weeks.parquet", index=False)
+    # The neutral filename is canonical for either frequency; retain the old
+    # weekly filename as an exact compatibility alias for existing consumers.
+    weeks.to_parquet(config.output / "periods.parquet", index=False)
     base = base_universe(config, weeks)
     if base.empty:
         raise DataGateError("过滤后基础股票池为空")
@@ -281,14 +327,18 @@ def build_panel(config: Config) -> dict:
     coverage.to_csv(config.output / "coverage.csv", index=False)
     diagnostics.to_csv(config.output / "preprocessing_failures.csv", index=False)
     features.to_parquet(config.output / "features.parquet", index=False)
-    manifest = {"schema_version": 2, "calculation_version": 3,
+    manifest = {"schema_version": 2, "calculation_version": _panel_calculation_version(config),
                 "config_digest": config.digest, "status": "features_frozen",
                 "weeks": len(weeks), "signal_rows": len(features), "base_rows": len(base),
+                "periods": len(weeks), "rebalance_frequency": config.rebalance_frequency,
+                "sample_policy": config.sample_policy,
                 "unknown_st_base_rows": int(base.is_st_unknown.sum()),
                 "unknown_suspension_base_rows": int(base.entry_suspension_unknown.sum()),
                 "signal_start": weeks.cutoff.min(), "signal_end": weeks.cutoff.max(),
                 "holding_start": weeks.entry.min(), "holding_end": weeks.exit.max(),
-                "source_fingerprints": {n: d["fingerprint"] for n, d in checked["sources"].items()}}
+                "source_fingerprints": {n: d["fingerprint"] for n, d in checked["sources"].items()},
+                "missing_source_paths": {name: str(config.source(name)) for name in source_columns(config)
+                                         if config.source(name) is not None and not config.source(name).is_file()}}
     write_json(config.output / "panel_manifest.json", manifest)
     # Features and group assignments are on disk before forward returns are connected.
     labels = make_labels(config, base)
@@ -325,11 +375,13 @@ def build_panel(config: Config) -> dict:
         manifest["status"] = "empty_benchmark"
     manifest["incomplete_benchmark_weeks"] = int(benchmark["return"].isna().sum())
     manifest["partial_benchmark_weeks"] = int((benchmark["return"].notna() & ~benchmark.data_complete).sum())
+    manifest["incomplete_benchmark_periods"] = manifest["incomplete_benchmark_weeks"]
+    manifest["partial_benchmark_periods"] = manifest["partial_benchmark_weeks"]
     manifest["data_policy"] = config.data_policy
     if config.data_policy["missing_returns"] in ("report", "available_case"):
         manifest["quality_status"] = manifest["status"]
         manifest["status"] = "ready"
-    files = ["weeks.parquet", "universe.parquet", "controls.parquet", "features.parquet", "labels.parquet",
+    files = ["periods.parquet", "weeks.parquet", "universe.parquet", "controls.parquet", "features.parquet", "labels.parquet",
              "benchmark.csv", "coverage.csv", "preprocessing_failures.csv"]
     manifest["artifact_fingerprints"] = {n: fingerprint(config.output / n) for n in files}
     write_json(config.output / "panel_manifest.json", manifest)
@@ -345,12 +397,19 @@ def ensure_panel(config: Config) -> dict:
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") != 2 or manifest.get("config_digest") != config.digest:
         raise DataGateError("冻结配置或面板版本不一致；请使用新的 output_dir")
-    if config.data_policy["mode"] == "classic" and manifest.get("calculation_version") != 3:
-        raise DataGateError("旧面板不含经典因子统计口径版本；请使用新的 output_dir 重建")
+    expected_version = _panel_calculation_version(config)
+    if manifest.get("calculation_version") != expected_version:
+        if expected_version == 3 and config.data_policy["mode"] == "classic":
+            raise DataGateError("旧面板不含经典因子统计口径版本；请使用新的 output_dir 重建")
+        raise DataGateError("面板计算版本与频率、样本或预处理口径不一致；请使用新的 output_dir 重建")
     for name, old in manifest["source_fingerprints"].items():
         source = config.source(name)
         if not source or not source.is_file() or fingerprint(source) != old:
             raise DataGateError(f"源文件 {name} 已改变；请新建输出目录重新构建")
+    for name in manifest.get("missing_source_paths", {}):
+        source = config.source(name)
+        if source is not None and source.is_file():
+            raise DataGateError(f"原先缺失的源文件 {name} 已补齐；请新建输出目录重新构建")
     if manifest["status"] != "ready":
         raise DataGateError(f"面板未通过门槛：{manifest['status']}")
     for name, old in manifest["artifact_fingerprints"].items():

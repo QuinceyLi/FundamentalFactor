@@ -62,8 +62,20 @@ def neutralize(values: np.ndarray, controls: np.ndarray, names: list[str],
 
 def prepare_signals(frame: pd.DataFrame, settings: dict | None = None, *,
                     include_float_mcap: bool = True,
-                    variants: list[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+                    variants: list[str] | None = None,
+                    sample_policy: str = "common") -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Transform precomputed factors without using realized returns.
+
+    The legacy common policy requires a complete shared sample. Independent
+    samples filter only the inputs needed by each transformation, so requesting
+    a risk-neutral result cannot change the raw result or suppress its period.
+    """
     settings = DEFAULT_PREPROCESS | (settings or {})
+    for option in ("winsorize", "standardize"):
+        if not isinstance(settings.get(option, True), bool):
+            raise ValueError(f"preprocess.{option} must be boolean")
+    if sample_policy not in {"common", "independent"}:
+        raise ValueError("sample_policy must be common or independent")
     variants = list(variants if variants is not None else
                     (VARIANTS if include_float_mcap else ["raw", "industry", "full"]))
     if (not variants or len(set(variants)) != len(variants) or
@@ -73,29 +85,97 @@ def prepare_signals(frame: pd.DataFrame, settings: dict | None = None, *,
     needs_cap = "industry_size" in variants or ("full" in variants and include_float_mcap)
     numeric_columns = ["value"] + (["float_mcap"] if needs_cap else []) + (RISK_FIELDS if "full" in variants else [])
     required = ["entry", "exit", "code"] + (["industry"] if needs_industry else []) + numeric_columns
+    if sample_policy == "independent":
+        required = ["entry", "exit", "code", "value"]
     if missing := set(required) - set(frame):
         raise ValueError(f"preprocessing missing columns: {sorted(missing)}")
     if frame.duplicated(["entry", "exit", "code"]).any():
         raise ValueError("duplicate preprocessing keys")
     signals, diagnostics = [], []
+
+    def transform_base(values):
+        if settings.get("winsorize", True):
+            values, method = winsorize(values, settings)
+        else:
+            values, method = np.asarray(values, dtype=float).copy(), "disabled"
+        if settings.get("standardize", True):
+            values = standardize(values, settings["rank_tolerance"])
+        return values, method
+
+    def transform_neutral(values, group, variant):
+        use_cap = variant == "industry_size" or (variant == "full" and include_float_mcap)
+        controls, names = control_matrix(group, variant == "full", include_float_mcap=use_cap)
+        residual, info = neutralize(values, controls, names, settings["rank_tolerance"])
+        if settings.get("standardize", True):
+            residual = standardize(residual, settings["rank_tolerance"])
+        elif np.linalg.norm(residual) <= settings["rank_tolerance"] * np.linalg.norm(values):
+            # An exactly explained factor can leave QR roundoff with arbitrary
+            # ranks. Remove only numerical zero; do not rescale other residuals
+            # or alter a raw signal, including genuinely tiny-valued inputs.
+            residual = np.zeros_like(residual)
+        return residual, info
+
+    def append_signal(entry, group, variant, values, method, info):
+        out = group.copy()
+        out["variant"], out["signal"] = variant, values
+        out["percentile"] = out.signal.rank(method="average", pct=True)
+        out["group"] = np.ceil(10 * out.percentile).clip(1, 10).astype(int)
+        signals.append(out)
+        constant = np.ptp(values) == 0
+        diagnostics.append({"entry": entry, "variant": variant,
+                            "status": "constant" if constant else "ok", "reason": "constant_signal" if constant else "",
+                            "n_stocks": len(group), "winsor_method": method, **info})
+
     for entry, group in frame.groupby("entry", sort=True):
         group = group.sort_values("code").copy()
+        if sample_policy == "independent":
+            finite_factor = np.isfinite(group.value.to_numpy(dtype=float))
+            for variant in variants:
+                use_cap = variant == "industry_size" or (variant == "full" and include_float_mcap)
+                numeric = (["float_mcap"] if use_cap else []) + (RISK_FIELDS if variant == "full" else [])
+                columns = numeric + (["industry"] if variant != "raw" else [])
+                missing = set(columns) - set(group)
+                if missing:
+                    diagnostics.append({"entry": entry, "variant": variant, "status": "failed",
+                                        "reason": "missing_control_columns:" + ",".join(sorted(missing)),
+                                        "n_stocks": 0, "winsor_method": "not_applied"})
+                    continue
+                valid = finite_factor.copy()
+                if numeric:
+                    valid &= np.isfinite(group[numeric].to_numpy(dtype=float)).all(axis=1)
+                if use_cap:
+                    valid &= group.float_mcap.gt(0).to_numpy()
+                if variant != "raw":
+                    valid &= group.industry.astype("string").str.strip().ne("").fillna(False).to_numpy(dtype=bool)
+                selected = group.loc[valid].copy()
+                if selected.empty:
+                    diagnostics.append({"entry": entry, "variant": variant, "status": "empty",
+                                        "reason": ("no_valid_factor_values" if not finite_factor.any()
+                                                   else "no_valid_control_observations"),
+                                        "n_stocks": 0, "winsor_method": "not_applied"})
+                    continue
+                values, method = transform_base(selected.value.to_numpy())
+                info = {"rank": 0, "columns": 0, "redundant_columns": ""}
+                if variant != "raw":
+                    try:
+                        values, info = transform_neutral(values, selected, variant)
+                    except ValueError as exc:
+                        diagnostics.append({"entry": entry, "variant": variant, "status": "failed",
+                                            "reason": str(exc), "n_stocks": len(selected), "winsor_method": method})
+                        continue
+                append_signal(entry, selected, variant, values, method, info)
+            continue
         numeric = group[numeric_columns].to_numpy(dtype=float)
         if (not np.isfinite(numeric).all() or (needs_industry and group.industry.isna().any())
                 or (needs_cap and group.float_mcap.le(0).any())):
             raise ValueError("prepare_signals requires a frozen complete common sample")
-        clipped, method = winsorize(group.value.to_numpy(), settings)
-        raw = standardize(clipped, settings["rank_tolerance"])
+        raw, method = transform_base(group.value.to_numpy())
         transformed = {"raw": raw}
         infos = {"raw": {"rank": 0, "columns": 0, "redundant_columns": ""}}
         failed = None
         for variant in (v for v in variants if v != "raw"):
-            use_cap = variant == "industry_size" or (variant == "full" and include_float_mcap)
-            controls, names = control_matrix(group, variant == "full", include_float_mcap=use_cap)
             try:
-                residual, info = neutralize(raw, controls, names, settings["rank_tolerance"])
-                transformed[variant] = standardize(residual, settings["rank_tolerance"])
-                infos[variant] = info
+                transformed[variant], infos[variant] = transform_neutral(raw, group, variant)
             except ValueError as exc:
                 failed = str(exc)
                 break
@@ -104,15 +184,7 @@ def prepare_signals(frame: pd.DataFrame, settings: dict | None = None, *,
                                 "reason": failed, "n_stocks": len(group), "winsor_method": method})
             continue
         for variant in variants:
-            out = group.copy()
-            out["variant"], out["signal"] = variant, transformed[variant]
-            out["percentile"] = out.signal.rank(method="average", pct=True)
-            out["group"] = np.ceil(10 * out.percentile).clip(1, 10).astype(int)
-            signals.append(out)
-            constant = np.ptp(transformed[variant]) == 0
-            diagnostics.append({"entry": entry, "variant": variant,
-                                "status": "constant" if constant else "ok", "reason": "constant_signal" if constant else "",
-                                "n_stocks": len(group), "winsor_method": method, **infos[variant]})
+            append_signal(entry, group, variant, transformed[variant], method, infos[variant])
     signal_columns = list(frame.columns) + ["variant", "signal", "percentile", "group"]
     diag_columns = ["entry", "variant", "status", "reason", "n_stocks", "winsor_method",
                     "rank", "columns", "redundant_columns"]

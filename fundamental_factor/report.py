@@ -19,17 +19,60 @@ VARIANTS = {"raw": "原始信号", "industry_size": "行业市值中性化信号
 
 def _variant_labels(config: dict | None = None, values=()) -> dict:
     all_labels = VARIANTS | {"industry": "行业中性化信号"}
+    preprocessing = (config or {}).get("preprocess", {})
+    if not preprocessing.get("winsorize", True) and not preprocessing.get("standardize", True):
+        all_labels["raw"] = "原样输入信号"
     industry_only = (config or {}).get("neutralization", {}).get("include_float_mcap", True) is False
     if industry_only or "industry" in values:
-        labels = {"raw": "原始信号", "industry": "行业中性化信号", "full": "全中性化信号"}
+        labels = {name: all_labels[name] for name in ("raw", "industry", "full")}
     else:
-        labels = VARIANTS
+        labels = {name: all_labels[name] for name in VARIANTS}
     selected = (config or {}).get("neutralization", {}).get("variants")
     if selected is not None:
         return {name: all_labels[name] for name in selected if name in all_labels}
     if len(values):
         return {name: all_labels[name] for name in values if name in all_labels}
     return labels
+
+
+def _independent_samples(config: dict) -> bool:
+    return config.get("neutralization", {}).get("sample_policy", "common") == "independent"
+
+
+def _contextualize(body: str, config: dict) -> str:
+    """Adapt generated report prose, leaving source audit and filenames intact."""
+    if config.get("backtest", {}).get("rebalance_frequency", "weekly") == "monthly":
+        for old, new in (("下一周", "下一月"), ("周度", "月度"), ("每周", "每月"),
+                         ("逐周", "逐月"), ("当周", "当月"), ("整周", "整月"),
+                         ("周初", "月初"), ("周内", "月内"), ("股周", "股月"),
+                         ("周收益", "月收益"), ("周数", "月数"), ("周次", "月次"),
+                         ("该周", "该月"), ("各周", "各月"), ("单周", "单月"),
+                         ("受影响周起", "受影响月起"), (" 周）", " 月）")):
+            body = body.replace(old, new)
+    if _independent_samples(config):
+        for old, new in (("所选信号共同样本数", "控制字段交集数（诊断）"),
+                         ("共同样本覆盖率", "控制字段交集覆盖率（诊断）"),
+                         ("共同样本 ALL", "该版本样本 ALL"),
+                         ("ALL（共同样本多头）", "ALL（该版本样本多头）"),
+                         ("该因子共同样本的独立多头账户", "该版本样本的独立多头账户"),
+                         ("ALL 是共同样本的独立多头账户", "ALL 是该版本样本的独立多头账户")):
+            body = body.replace(old, new)
+    return body
+
+
+def _coverage_series(frame: pd.DataFrame, config: dict, prefix: str = "") -> list[dict]:
+    ordered = frame.sort_values("entry") if "entry" in frame else frame
+    series = [{"name": prefix + "原始因子覆盖率", "points": _points(ordered, "raw_coverage", "entry")}]
+    if _independent_samples(config):
+        for name, label in _variant_labels(config).items():
+            column = f"variant_{name}_coverage"
+            if column in ordered:
+                series.append({"name": prefix + label + "测试覆盖率", "points": _points(ordered, column, "entry")})
+        if len(_variant_labels(config)) > 1 and "common_coverage" in ordered:
+            series.append({"name": prefix + "控制字段交集（仅诊断）", "points": _points(ordered, "common_coverage", "entry")})
+    else:
+        series.append({"name": prefix + "所选信号共同样本覆盖率", "points": _points(ordered, "common_coverage", "entry")})
+    return series
 
 
 def _universe_label(config: dict) -> str:
@@ -86,6 +129,10 @@ PERCENT = {
     "annual_target_turnover", "target_turnover", "mean_missing_weight", "max_missing_weight",
     "mean_evaluation_weight", "missing_weight", "evaluation_weight_sum", "cash_weight",
 }
+for _variant, _label in (VARIANTS | {"industry": "行业中性化信号"}).items():
+    LABELS[f"variant_{_variant}_count"] = f"{_label}测试股票数"
+    LABELS[f"variant_{_variant}_coverage"] = f"{_label}测试覆盖率"
+    PERCENT.add(f"variant_{_variant}_coverage")
 PERFORMANCE_COLUMNS = ["portfolio", "n_periods", "total_return", "annual_return", "annual_volatility",
                        "information_ratio", "win_rate", "max_drawdown", "annual_turnover", "excess_total_return",
                        "excess_annual_return", "excess_annual_volatility", "excess_information_ratio",
@@ -137,7 +184,7 @@ def _format(value: Any, column: str = "") -> str:
             return "—"
         if column in PERCENT:
             return f"{float(value):.2%}"
-        if column in {"n", "n_periods", "year", "n_stocks", "base_count", "common_count", "factor_available", "missing_factor", "missing_controls",
+        if column.startswith("variant_") and column.endswith("_count") or column in {"n", "n_periods", "year", "n_stocks", "base_count", "common_count", "factor_available", "missing_factor", "missing_controls",
                       "calendar_weeks", "valid_return_weeks", "empty_weeks", "missing_return_weeks", "min_stocks", "max_stocks",
                       "target_empty_weeks", "signal_missing_weeks", "blocked_buy_weeks", "blocked_sell_weeks",
                       "carried_valuation_count", "rebalance_weeks"}:
@@ -318,6 +365,25 @@ def _records(value: Any) -> str:
     return f"<p>{_escape(value)}</p>" if value else ""
 
 
+def _sample_records(sample: dict, config: dict) -> str:
+    """Present period metadata without exposing duplicate legacy week counters."""
+    sample = dict(sample)
+    frequency = config.get("backtest", {}).get("rebalance_frequency", "weekly")
+    values = {"调仓频率": "月度" if frequency == "monthly" else "周度"}
+    periods = sample.get("periods", sample.get("weeks"))
+    if periods is not None:
+        values["持有期数"] = periods
+    names = {"signal_rows": "因子股票期记录数", "signal_start": "首个信号截点",
+             "signal_end": "最后信号截点", "holding_start": "首次入场日", "holding_end": "最后退出日",
+             "mean_raw_coverage": "因子平均有效覆盖率",
+             "mean_common_coverage": "控制字段交集平均覆盖率（诊断）" if _independent_samples(config) else "共同样本平均覆盖率"}
+    for key, value in sample.items():
+        if key in {"periods", "weeks", "rebalance_frequency", "frequency"}:
+            continue
+        values[names.get(key, key)] = _format(value, "raw_coverage") if key.endswith("coverage") else value
+    return _records(values)
+
+
 def _source_audit(audit: dict) -> str:
     sources, numeric = [], []
     entries = audit.get("sources", {})
@@ -346,7 +412,9 @@ def _source_audit(audit: dict) -> str:
 def _definitions(config: dict) -> str:
     backtest = DEFAULT_BACKTEST | config.get("backtest", {})
     preprocess = DEFAULT_PREPROCESS | config.get("preprocess", {})
-    metrics = DEFAULT_METRICS | config.get("metrics", {})
+    monthly = backtest.get("rebalance_frequency", "weekly") == "monthly"
+    metric_defaults = DEFAULT_METRICS | ({"annualization": 12, "nw_lag": 3} if monthly else {})
+    metrics = metric_defaults | config.get("metrics", {})
     minimum = backtest["min_listing_sessions"]
     annualization, lag = metrics["annualization"], metrics["nw_lag"]
     quantiles = preprocess["fallback_quantiles"]
@@ -364,12 +432,30 @@ def _definitions(config: dict) -> str:
     elif "full" in variants:
         neutral_definition += f"；全中性再加入冻结配置的全部 {len(risk_fields)} 项 Barra 暴露"
     selected_label = "、".join(variants.values())
+    preprocessing_steps = []
+    if preprocess.get("winsorize", True):
+        preprocessing_steps.append(f"{multiplier:g}×{normalizer:g} MAD 截尾；MAD 为零时回退到 {quantiles[0] * 100:g}%/{quantiles[1] * 100:g}% 分位截尾")
+    else:
+        preprocessing_steps.append("去极值关闭")
+    if preprocess.get("standardize", True):
+        preprocessing_steps.append("横截面标准化使用总体标准差（ddof=0），中性化残差也重新标准化")
+    else:
+        preprocessing_steps.append("标准化关闭，中性化残差保留其尺度")
+    preprocess_definition = "预处理设置：" + "；".join(preprocessing_steps) + f"。数值秩及常数判断容差为 {tolerance:g}。"
+    if not preprocess.get("winsorize", True) and not preprocess.get("standardize", True):
+        preprocess_definition += " raw 直接使用输入因子值，signal=value；不改变真实零值、负值或原始尺度。"
+    else:
+        preprocess_definition += " raw 表示未中性化版本，仍包含上述已开启的预处理，并非输入值原样通过。"
+    sample_definition = (f"本次选择{selected_label}。各版本独立筛选所需输入；raw 只要求有效因子值，不受行业或 Barra 缺失影响。"
+                         "中性化版本仅使用自身所需控制完整的股票，失败不会删除其它版本的信号。各版本收益差异可能同时来自处理方式和样本差异；控制字段交集仅作覆盖诊断。"
+                         if _independent_samples(config) else
+                         f"本次选择{selected_label}。每个因子的所选信号使用相同股票样本以便比较；这项比较规则不是原始等权回测对行业或市值的数学要求。不同因子的覆盖率可以不同。")
     items = [
         f"投资域为{universe}，包含金融行业；剔除信号时点已知 ST/*ST、上市不足 {minimum} 个交易日及入场停牌股票。",
         "每周首个交易日前一自然日日终形成信号；按该周首个交易日开盘至下一周首个交易日开盘计算持有期收益。",
-        f"原始信号：{multiplier:g}×{normalizer:g} MAD 截尾；MAD 为零时回退到 {quantiles[0] * 100:g}%/{quantiles[1] * 100:g}% 分位截尾；横截面标准化使用总体标准差（ddof=0）。数值秩及常数判断容差为 {tolerance:g}。",
+        preprocess_definition,
         f"{neutral_definition}。如启用中性化，OLS 只对当期因子中性化，收益保持原始口径；控制缺失不补零，共线控制保留等价张成空间并记录。",
-        f"本次选择{selected_label}。每个因子的所选信号使用相同股票样本以便比较；这项比较规则不是原始等权回测对行业或市值的数学要求。不同因子的覆盖率可以不同。",
+        sample_definition,
         "RankIC（Spearman）为主要指标，Pearson IC 附报。TOP/BOTTOM 按各套处理后因子的平均排名分位选择；并列值不拆分，子样本和十分组可以不等人数或为空。",
         "Q1 为低因子值，Q10 为高因子值，不根据历史收益翻转方向。每周入场按组内等权形成理论组合。",
         f"基准为过滤后{universe}等权组合，独立于因子或风险控制字段覆盖；每周收益按相同持有期计算。超额收益为逐周组合收益减基准收益，再进行复利。",
@@ -426,6 +512,10 @@ def _definitions(config: dict) -> str:
         items.append("全中性使用的风险暴露：" + "、".join(str(field) for field in risk_fields) + "。")
     if backtest.get("start_date") or backtest.get("end_date"):
         items.append(f"配置的信号入场日期范围：{backtest.get('start_date') or '不限'} 至 {backtest.get('end_date') or '不限'}；实际首末持有期见样本信息。")
+    items.append("因子更新频率与调仓频率分别确定；每次调仓取截点前最近一条记录，不对因子做周/月平均。date 必须是实际可用日期，最新记录为空时不越过它寻找旧值。")
+    if monthly:
+        items.append("本次按月调仓：完整交易日历中每月首个交易日开盘进入，持有至下月首个交易日开盘；月中开始的区间不会伪造月初调仓日。")
+        items.append("periods.parquet、ic_periodic.csv、portfolio_periodic.csv 以持有期为单位；兼容文件 weeks.parquet 及 *_weekly.csv 在本次也存月度记录，文件名不改变收益频率。")
     sources = ""
     if policy.get("missing_returns") == "available_case":
         sources = ('<p class="caption">方法参考：<a href="https://github.com/microsoft/qlib/blob/main/qlib/contrib/eva/alpha.py">'
@@ -435,7 +525,7 @@ def _definitions(config: dict) -> str:
                    '本项目采用分组后有效收益统计，保留原始分组和缺失披露；空组现金是本项目配置约定。'
                    '<a href="https://github.com/microsoft/qlib/blob/main/qlib/backtest/account.py">Qlib 持仓估值</a>'
                    '在停牌时保留已有价格，这与统计均值计算属于不同层次；本报告不是持续现金账户的可实现全收益。</p>')
-    return _details("指标定义与回测口径", "<ol>" + "".join(f"<li>{_escape(item)}</li>" for item in items) + "</ol>" + sources, True)
+    return _contextualize(_details("指标定义与回测口径", "<ol>" + "".join(f"<li>{_escape(item)}</li>" for item in items) + "</ol>" + sources, True), config)
 
 
 def _prioritize_diagnostics(frame: pd.DataFrame) -> pd.DataFrame:
@@ -536,7 +626,7 @@ def _execution_diagnostics(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _execution_section(folder: Path, factor: dict, charts: _Charts) -> str:
+def _execution_section(folder: Path, factor: dict, charts: _Charts, config: dict | None = None) -> str:
     """Display account results only when explicitly enabled by this run's card."""
     heading = '<h2 id="execution">执行账本（可选）</h2>'
     metadata = factor.get("execution", {})
@@ -562,7 +652,7 @@ def _execution_section(folder: Path, factor: dict, charts: _Charts) -> str:
     if weekly.duplicated(["entry", "exit", "variant", "portfolio"]).any() or performance.duplicated(["variant", "portfolio"]).any():
         return heading + _notice("执行账本产物未通过核验", "账户周次或绩效汇总存在重复键，本节未展示执行数值。")
     portfolios = ["ALL"] + PORTFOLIOS[:-1]
-    variants = _variant_labels(values=weekly.variant.unique())
+    variants = _variant_labels(config, values=weekly.variant.unique())
     supported = weekly.variant.isin(variants) & weekly.portfolio.isin(portfolios)
     sections = [heading, _notice("现金与持股逐日记账的费前执行模拟", "本节账户保留旧持仓和现金，并处理交易限制。Q10、Q1 是各自独立的多头账户，不声称实际融券多空；主理论分组检验保持原口径。", "info")]
     adjusted_units = metadata.get("price_mode") == "adjusted_units"
@@ -626,7 +716,7 @@ def _execution_section(folder: Path, factor: dict, charts: _Charts) -> str:
     files = ["execution_weekly.csv", "execution_performance.csv", "execution_holdings.parquet", "execution_trades.parquet", "execution_daily.parquet"]
     links = [f'<li><a href="{filename}">{filename}</a></li>' for filename in files if (folder / filename).is_file()]
     sections.append("<h3>执行账本产物</h3><ul>" + "".join(links) + "</ul>")
-    return "\n".join(sections)
+    return _contextualize("\n".join(sections), config or {})
 
 
 _CSS = """
@@ -731,7 +821,7 @@ def _quality_disclosure(config: dict, audit: dict, manifest: dict, usable: bool)
     body = "<h2>计算状态与数据完整性</h2>" + render_table(pd.DataFrame(rows))
     if requested and not execution_passed:
         body += _details("可选执行账本未运行的原因", "<ul>" + "".join(f"<li>{_escape(item)}</li>" for item in audit.get("execution_blocking", [])) + "</ul>")
-    return body
+    return _contextualize(body, config)
 
 
 def _blocked(issues: list[str]) -> str:
@@ -769,20 +859,21 @@ def _factor_report(root: Path, folder: Path, factor: dict, config: dict, audit: 
                 usable = False
     if not usable:
         sections += [_blocked(issues), _definitions(config), _artifact_links(folder)]
-        return _write(folder / "report.html", f"{label} · 数据门槛", sections)
+        return _write(folder / "report.html", f"{label} · 数据门槛", [_contextualize(section, config) for section in sections])
     charts = _Charts()
-    sections.append(_notice("费前因子分组与相关性检验", "所选信号共享样本；不训练预测模型。理论等权组合及双边换手不包含交易费用，也不等于实际可成交结果。", "info"))
+    sample_notice = ("各版本独立筛选样本，raw 不受行业或 Barra 缺失影响；不同版本的结果差异同时可能包含样本差异。"
+                     if _independent_samples(config) else "所选信号共享样本；")
+    sections.append(_notice("费前因子分组与相关性检验", sample_notice + "不训练预测模型。理论等权组合及双边换手不包含交易费用，也不等于实际可成交结果。", "info"))
     sections.append(_quality_disclosure(config, audit, load_json(root / "panel_manifest.json"), True))
-    sections.append("<h2>测试信息</h2>" + _records(factor.get("sample", {})))
+    sections.append("<h2>测试信息</h2>" + _sample_records(factor.get("sample", {}), config))
     if factor.get("summary"):
         sections.append(_records(factor["summary"]))
     sections.append(_definitions(config))
     sections.append("<h2>1. 覆盖度</h2>")
     local = coverage[coverage.factor.astype(str) == name].sort_values("entry") if "factor" in coverage else pd.DataFrame()
-    sections.append(charts.chart("逐周因子覆盖与所选信号共同样本", [
-        {"name": "原始因子覆盖率", "points": _points(local, "raw_coverage", "entry")},
-        {"name": "所选信号共同样本覆盖率", "points": _points(local, "common_coverage", "entry")},
-    ], unit="percent", caption=f"分母为独立的过滤后{_universe_label(config)}基准股票池。控制字段缺失不会被填为零。"))
+    coverage_title = "逐周因子覆盖与各版本测试样本" if _independent_samples(config) else "逐周因子覆盖与所选信号共同样本"
+    sections.append(charts.chart(coverage_title, _coverage_series(local, config), unit="percent",
+                                caption=f"分母为独立的过滤后{_universe_label(config)}基准股票池。控制字段缺失不会被填为零。"))
     sections.append(_details("覆盖、零值及并列情况（完整数据见 CSV）", render_table(local, 30)))
     for index, (variant, title) in enumerate(_variant_labels(config).items(), 2):
         sections.append(f'<h2 id="{variant}">{index}. {_escape(title)}</h2>')
@@ -847,13 +938,14 @@ def _factor_report(root: Path, folder: Path, factor: dict, config: dict, audit: 
         if not annual.empty and "variant" in annual:
             selected = annual[(annual.variant == variant) & annual.portfolio.isin(PORTFOLIOS)]
             sections.append(_details("年度分组与多空表现", render_table(selected, 300, ["year"] + performance_columns)))
-    sections.append(_execution_section(folder, factor, charts))
+    sections.append(_execution_section(folder, factor, charts, config))
     sections.append("<h2>失败、缺口与交易限制</h2>")
     failures = _csv(root / "preprocessing_failures.csv")
     if not failures.empty and "factor" in failures:
         failures = failures[failures.factor.astype(str) == name]
     sections.append('<p class="caption">优先显示失败、常数信号及冗余控制记录，再显示常规正常记录；完整明细见 CSV。</p>' + render_table(_prioritize_diagnostics(failures), 60))
     sections.append("<p>停牌、退市估值和交易受限明细见根目录股票池与收益面板、基准及诊断产物；未知收益不会静默补零。</p>")
+    sections = [_contextualize(section, config) for section in sections]
     sections.append(_details("数据审计与来源版本", _source_audit(audit)))
     sections.append(_artifact_links(folder))
     return _write(folder / "report.html", f"{label} 因子测试报告", sections)
@@ -944,11 +1036,11 @@ def report(run_dir: str | Path) -> Path:
         coverage_series = []
         if "factor" in coverage:
             for name, frame in coverage.groupby("factor", sort=False):
-                coverage_series.append({"name": str(name) + " 原始覆盖", "points": _points(frame.sort_values("entry"), "raw_coverage", "entry")})
-                coverage_series.append({"name": str(name) + " 共同样本", "points": _points(frame.sort_values("entry"), "common_coverage", "entry")})
+                coverage_series.extend(_coverage_series(frame, config, prefix=str(name) + " "))
         sections.append(charts.chart("逐因子覆盖率", coverage_series, unit="percent", caption="覆盖数据来自当前审计与面板；缺失收益不会用于重排股票或改变当期排名。"))
         sections.append(_details("逐周覆盖明细", render_table(coverage, 40)))
     sections.append(_definitions(config))
+    sections = [_contextualize(section, config) for section in sections]
     sections.append(_source_audit(audit))
     for filename, title in [("preprocessing_failures", "预处理与分组失败记录"), ("field_mapping", "因子分类表映射与来源修正")]:
         if filename == "preprocessing_failures" and not current_panel:

@@ -12,7 +12,7 @@ from .research import run_research
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="单因子周度分组回测与标准测试报告")
+    parser = argparse.ArgumentParser(description="单因子周度/月度分组回测与标准测试报告")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ["audit", "build-panel", "run"]:
         command = commands.add_parser(name)

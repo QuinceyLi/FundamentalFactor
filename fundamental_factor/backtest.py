@@ -190,8 +190,10 @@ def _segmented_path(values, compound: bool = True) -> tuple[list[float], list[in
 
 
 def _prepare_inputs(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.DataFrame,
-                    weeks: pd.DataFrame, missing_returns: str = "error"
+                    weeks: pd.DataFrame, missing_returns: str = "error", sample_policy: str = "common"
                     ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if sample_policy not in ("common", "independent"):
+        raise ValueError("sample_policy must be common or independent")
     if missing_returns not in ("error", "report", "available_case"):
         raise ValueError("missing_returns must be error, report or available_case")
     allow_missing = missing_returns != "error"
@@ -269,25 +271,28 @@ def _prepare_inputs(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
         joined.trade_restriction_unknown.astype("boolean").fillna(True).astype(bool) |
         joined.trade_restricted.isna())
     variants = sorted(signals.variant.unique())
-    # The runner supports a single variant for pure tests, but any supplied
-    # variants must contain exactly the same frozen stock sample each week.
-    for _, block in signals.groupby(["entry", "exit"], sort=False):
-        sets = [set(block.loc[block.variant == variant, "code"]) for variant in variants]
-        if any(stock_set != sets[0] for stock_set in sets[1:]):
-            raise DataGateError("Preprocessing variants do not share the same frozen stock sample")
+    if sample_policy == "common":
+        for _, block in signals.groupby(["entry", "exit"], sort=False):
+            sets = [set(block.loc[block.variant == variant, "code"]) for variant in variants]
+            if any(stock_set != sets[0] for stock_set in sets[1:]):
+                raise DataGateError("Preprocessing variants do not share the same frozen stock sample")
     return joined, labels, bench, weeks
 
 
 def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.DataFrame,
                     weeks: pd.DataFrame, annualization: int = 52,
                     nw_lag: int = 13, missing_returns: str = "error",
-                    empty_groups: str = "missing") -> dict[str, pd.DataFrame]:
-    """Evaluate one factor and all preprocessing variants on identical weekly keys."""
+                    empty_groups: str = "missing", sample_policy: str = "common",
+                    variants: list[str] | None = None) -> dict[str, pd.DataFrame]:
+    """Evaluate frozen signals over supplied weekly or monthly holding intervals."""
     if empty_groups not in ("missing", "cash"):
         raise ValueError("empty_groups must be missing or cash")
-    joined, labels, benchmark, weeks = _prepare_inputs(signals, labels, benchmark, weeks, missing_returns)
+    joined, labels, benchmark, weeks = _prepare_inputs(signals, labels, benchmark, weeks, missing_returns, sample_policy)
     available_case = missing_returns == "available_case"
-    variants = sorted(joined.variant.unique())
+    observed_variants = set(joined.variant.unique())
+    variants = sorted(observed_variants) if variants is None else list(variants)
+    if not variants or len(set(variants)) != len(variants) or not observed_variants.issubset(variants):
+        raise ValueError("Requested variants must be unique and include all supplied signal variants")
     benchmark_map = benchmark.set_index("entry")["return"].to_dict()
     by_week = {(entry, variant): block for (entry, variant), block in
                joined.groupby(["entry", "variant"], sort=False)}

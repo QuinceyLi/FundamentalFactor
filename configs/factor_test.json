@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "data_root": "/data/mongo",
-  "output_dir": "../outputs/factor_test_available",
+  "output_dir": "../outputs/factor_test_direct_weekly",
   "dataset_kind": "observed",
   "classification_workbook": "/home/liqinghua/.codex/attachments/413d870c-c9f9-4abc-936a-cbe2822ef3a4/因子分类.xlsx",
   "factors": [
@@ -48,7 +48,8 @@
   "backtest": {
     "min_listing_sessions": 120,
     "start_date": null,
-    "end_date": null
+    "end_date": null,
+    "rebalance_frequency": "weekly"
   },
   "preprocess": {
     "mad_multiplier": 5.0,
@@ -57,7 +58,9 @@
       0.01,
       0.99
     ],
-    "rank_tolerance": 1e-10
+    "rank_tolerance": 1e-10,
+    "winsorize": false,
+    "standardize": false
   },
   "metrics": {
     "annualization": 52,
@@ -70,10 +73,9 @@
   "neutralization": {
     "include_float_mcap": false,
     "variants": [
-      "raw",
-      "industry",
-      "full"
-    ]
+      "raw"
+    ],
+    "sample_policy": "independent"
   },
   "universe": {
     "exchanges": [
