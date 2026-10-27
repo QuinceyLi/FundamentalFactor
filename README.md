@@ -2,7 +2,7 @@
 
 读取外部已经计算好的因子值，分别测试 `ROIC_new` 和 `fundnum_promotion`，不重新计算财务或持仓变化公式。当前默认配置直接测试输入值；去极值、标准化和中性化均可选，支持周度或月度调仓。输出包含覆盖度、RankIC/Pearson IC、十分组净值、超额净值、Q10−Q1、年度表现和双边换手。**不训练预测模型，也不使用持仓优化器**；目标持仓直接使用冻结的组内等权，缺失收益的统计权重另行记录，执行账本仅落实权重及成交约束。配置中的因子列表可以扩展到其他明细文件。
 
-当前推荐 `configs/factor_test.json`（与 `factor_test_direct_weekly.json` 相同），按周直接测试原始输入；`configs/factor_test_direct_monthly.json` 按月直接测试。两者关闭去极值和标准化，仅选 `raw`，使用独立样本；原始版本不依赖行业、实际市值或 Barra 暴露。需要中性化时可加入 `industry`、`full` 等版本；纯行业中性不需要行业市值或个股市值。沪深A股、`missing_returns=available_case` 和 `empty_groups=cash` 的口径继续保留。旧 `factor_test_available.json`、`factor_test_classic.json` 及对应产物保留，用于复现此前研究。
+当前推荐 `configs/factor_test.json`（与 `factor_test_direct_weekly.json` 相同），按周直接测试原始输入；`configs/factor_test_direct_monthly.json` 按月直接测试。两者关闭去极值和标准化，仅选 `raw`，使用独立样本；原始版本不依赖行业、市值或 Barra 暴露。需要中性化时可加入 `industry`、`size`、`industry_size` 或 `full` 版本；纯行业中性不需要行业市值或个股市值，纯市值中性不需要行业或 Barra。`configs/factor_test_size_proxy_weekly.json` 和 `configs/factor_test_size_proxy_monthly.json` 使用行情代理市值，分别按周／月比较 `raw` 与 `size`。沪深A股、`missing_returns=available_case` 和 `empty_groups=cash` 的口径继续保留。旧 `factor_test_available.json`、`factor_test_classic.json` 及对应产物保留，用于复现此前研究。
 
 经典模式把核心因子统计与可选筛选、执行数据分开：完整历史 ST、完整停复牌/涨跌停例外、公司行动明细及真实退市现金不作为统一门槛。已有官方 ST 历史和 GF 停牌/涨跌停代理继续使用；未覆盖状态保持未知。推荐配置在冻结组内按有效收益统计，不因一只股票缺失标签而使整个组合当周无收益；同时披露缺失股票数和目标权重。可选执行账本未满足附加记账要求时单独跳过，并披露原因。此前2026-10-13的数据报告属于历史审计记录。
 
@@ -35,11 +35,51 @@ OPENBLAS_NUM_THREADS=1 python3 -m fundamental_factor run --config configs/factor
 
 - `rebalance_frequency` 可为 `weekly` 或 `monthly`，分别在每周／每月首个交易日开盘调仓，持有到下一期首个交易日开盘。先按完整日历定位，再截取研究区间；不会把月中起始日当作月初。因子更新频率独立于调仓频率，月更因子也可以按周测试；输入 `date` 必须表示真实可用日期，月末收盘后可用的值用于其后的调仓。
 - `winsorize` 和 `standardize` 可分别开启。两者关闭时，`raw` 的 `signal` 与输入 `value` 逐值相同；开启后 `raw` 表示未中性化版本。标准化关闭时，中性化残差也不重新标准化。数据中的有限零值和负值保留，不把缺失填成零。
-- `variants=["raw"]` 关闭中性化；改成 `["raw", "industry", "full"]` 可比较原样输入、行业中性和行业加 Barra 中性。每个版本分别产生结果，`value` 保留输入，`signal` 记录实际测试值。
-- `sample_policy="independent"` 时，各版本仅要求自身所需字段有效；原始版本不受行业或 Barra 缺失、某个中性化版本失败的影响。覆盖表的 `variant_<name>_count/coverage` 记录真实测试样本，`common_count/common_coverage` 仅记录控制字段交集作为诊断。样本不同意味着版本间结果差异未必全来自中性化。
+- `variants=["raw"]` 关闭中性化；改成 `["raw", "industry", "full"]` 并设 `include_float_mcap=false`，可比较原样输入、行业中性和行业加 Barra 中性。`size` 仅控制个股对数市值，`industry_size` 同时控制行业及市值；显式选择版本时，二者均不依赖 `include_float_mcap` 开关，该开关只决定 `full` 是否额外控制市值。每个版本分别产生结果，`value` 保留输入，`signal` 记录实际测试值。
+- `sample_policy="independent"` 时，各版本仅要求自身所需字段有效；原始版本不受行业、市值或 Barra 缺失、某个中性化版本失败的影响。覆盖表的 `variant_<name>_count/coverage` 记录真实测试样本，`common_count/common_coverage` 仅记录控制字段交集作为诊断。样本不同意味着版本间结果差异未必全来自中性化。
 - `sample_policy="common"` 保留共同样本比较规则；原始版本也会使用全部所选控制的有效交集。旧配置省略新增选项时，仍采用周度、去极值和标准化开启、共同样本，以复现原口径。新默认示例显式开启独立样本，不改变旧冻结配置。
 
 频率为周度／月度时，缺省年化频数分别为 52／12，Newey–West 滞后分别为 13／3 个持有期；可显式指定滞后。显式指定调仓频率时，年化参数必须与频率一致，不能只修改年化数字冒充月度调仓。
+
+## 行情代理市值与市值中性化
+
+按用户指定公式计算 `market_cap_proxy = close * volume * 100 / (turnover / 100)`。`close` 必须是未复权收盘价，`volume` 单位为手（1 手=100 股），`turnover` 为百分数（1 表示 1%）。例如 `close=10`、`volume=1000`、`turnover=2`，代理市值为 5,000 万元。复权价格用于持有期收益；代理市值使用原始价格，不能混用。
+
+这项数值是由成交量及换手率反推的市值代理，依赖源数据的单位与换手率分母，不等于独立核验过的实际流通市值。开启方式如下；完整数据映射见两个 `factor_test_size_proxy_*.json` 示例配置：
+
+```json
+{
+  "neutralization": {
+    "variants": ["raw", "size"],
+    "sample_policy": "independent",
+    "include_float_mcap": false,
+    "market_cap": {
+      "method": "quote_proxy",
+      "quotes_source": "market_cap_quotes",
+      "turnover_source": "quotes",
+      "close_column": "close",
+      "volume_column": "volume",
+      "turnover_column": "turnover",
+      "volume_unit": "lot",
+      "turnover_unit": "percent",
+      "price_basis": "unadjusted"
+    }
+  }
+}
+```
+
+示例中的 `market_cap_quotes` 指向既有原始行情 `/home/liqinghua/FundamentalFactor/outputs/gfoptim_inputs/raw_quotes.parquet`，`quotes` 指向 `/data/mongo/quotefac_repaired.feather`，后者提供换手率。源文件只读，代理值写入运行输出。23 个日期的外部行情样本核对中，收盘价一致，成交量差异不超过 0.5 手、换手率差异不超过 0.0049 个百分点，与舍入精度一致；这只验证所查样本与单位，不能证明全历史每条记录完整、真实，也不能证明换手率分母始终等于实际流通股本。
+
+先将原始收盘价、成交量和换手率按**同一天、同一股票**连接，再匹配调仓截点之前最近一条行情记录。周一开盘调仓通常用上周五收盘数据；月度同理，绝不使用调仓当日完整成交量或换手率。不对两套数据分别向前匹配再拼出不同日期的公式；最新记录缺失或无效时，也不跳过它回取更旧有效值。实现用两次向历史匹配后检查日期相等，等价于逐日外连接再取最新记录，避免大表外连接。`controls.parquet` 单独记录 `market_cap_proxy`、`market_cap_date`、两个来源各自日期、三项原始输入及 `market_cap_invalid_reason`，不会覆盖 `float_mcap`；信号和持仓明细也保留这些溯源字段。
+
+收盘价、成交量、换手率及最终代理值必须均为有限正数；零、负数、缺失或无穷值转为代理缺失。停牌日的零成交量不反推市值，也不填零。`size` 用截距及 `log(market_cap_proxy)` 做当期等权 OLS，残差作为测试信号；不需要行业或 Barra。`industry_size` 在此基础上加入行业；`full` 按 `include_float_mcap` 决定是否加入相同市值控制。`sample_policy=independent` 下，代理缺失只减少相应中性化版本的样本，原始因子样本和排名不受影响；报告分别展示各版本覆盖率。
+
+省略 `market_cap` 或使用 `method=history` 时，保留原来的 `history.float_mcap` 实际流通市值接口，不自动替换成代理。仅配置代理方法而未选择任何市值版本，不为原始因子增加代理数据要求。去极值与标准化仍分别由原有开关控制；没有新增预测模型或优化器。
+
+```bash
+OPENBLAS_NUM_THREADS=1 python3 -m fundamental_factor run --config configs/factor_test_size_proxy_weekly.json
+OPENBLAS_NUM_THREADS=1 python3 -m fundamental_factor run --config configs/factor_test_size_proxy_monthly.json
+```
 
 退出码 `0`：完成；`2`：核心输入或显式选择的研究要求未满足；`1`：配置或执行错误。`audit` 未通过也生成审计 HTML；`run` 在无缓存时先构建面板。默认 `data_policy.mode=classic`，未知 ST、未知停牌与缺失收益按经典统计口径披露；`strict` 保留可选的完整数据要求，`proxy` 兼容旧代理配置。核心计算通过、数据覆盖完整及执行模拟可用是分别报告的状态。
 
@@ -58,11 +98,13 @@ OPENBLAS_NUM_THREADS=1 python3 -m fundamental_factor run --config configs/factor
 | `risk` | `date, code` 和所选风险字段 | 仅全中性使用，缺失暴露不补零 |
 | `stocks` | `code, listing_date, delisting_date` | 上市年龄等已选择的股票池规则使用；保留已退市证券 |
 | `history` | `date, code`，按需读取 `industry, is_st, float_mcap` | 行业/市值仅对应中性化使用；ST 是可选股票池信息 |
+| `market_cap.quotes_source` | `date, code, close, volume`，列名可配置 | 仅启用 `quote_proxy` 市值中性时需要；未复权收盘价和以手计的成交量 |
+| `market_cap.turnover_source` | `date, code, turnover`，列名可配置 | 仅启用 `quote_proxy` 市值中性时需要；百分数换手率，可与原始行情同源 |
 | `calendar` | `date` | 构造周度／月度持有期与上市年龄；优先使用真实开市日历 |
 | `status` | `date, code, suspended`；可附 `limit_up, limit_down` | 可选交易状态或代理；缺失状态不自动令有效价格收益失效 |
 | `terminal` | `date, available_date, code, terminal_value` | 可选同价格基准的终止估值；缺失时不编造退市收益 |
 
-严格模式布尔值使用非空 `true/false` 或 `0/1`；经典/代理模式允许 ST 和交易状态为空，按规则处理并记录。经典模式默认 `st_unknown=include`、`suspension_unknown=include`、`missing_returns=report`，不把未知状态改写成非 ST 或未停牌。已有入场停牌仍剔除；缺少停牌记录但有有效价格时，理论收益可以计算。行业分类体系须保持一致；启用市值中性时 `float_mcap` 必须是真实市值。不能用 `STtype` 代替ST，不能用 Barra SIZE 或规模分档代替实际市值。
+严格模式布尔值使用非空 `true/false` 或 `0/1`；经典/代理模式允许 ST 和交易状态为空，按规则处理并记录。经典模式默认 `st_unknown=include`、`suspension_unknown=include`、`missing_returns=report`，不把未知状态改写成非 ST 或未停牌。已有入场停牌仍剔除；缺少停牌记录但有有效价格时，理论收益可以计算。行业分类体系须保持一致。`market_cap.method=history` 时 `float_mcap` 必须是真实流通市值；显式 `quote_proxy` 使用另存的行情代理值。不能用 `STtype` 代替ST，不能把 Barra SIZE、加工后的 `tmv`、规模分档或行情代理冒充已核验实际市值。
 
 20项暴露固定为：`AnalystSentiment, BETA, BTOP, DividendYield, EarningQuality, EarningsYield, EarningVariability, GROWTH, INDMOM, InvestmentQuality, LEVERAGE, LIQUIDTY, LongTermReversal, MOMENTUM, Profitability, RESVOL, SEASON, SIZE, STREV, MIDCAP`。`LIQUIDTY` 沿用源文件拼写。新增源字段不会自动改变全中性口径。
 
@@ -75,7 +117,7 @@ OPENBLAS_NUM_THREADS=1 python3 -m fundamental_factor run --config configs/factor
 | 数据 | 处理 |
 |---|---|
 | 因子 | 非有限值变缺失，真实零值及负值保留；向历史取最近快照，遇明确缺失更新不跨过去取更旧有效值；缺失因子不进入当期分组 |
-| 行业、Barra等控制 | 独立样本时仅排除需要该字段的版本，raw 不受影响；共同样本模式按全部所选字段的交集筛选，不填零 |
+| 行业、市值、Barra等控制 | 独立样本时仅排除需要该字段的版本，raw 不受影响；共同样本模式按全部所选字段的交集筛选，不填零。行情代理市值仅对同日有限正输入计算，保留最新无效记录 |
 | ST、停牌、涨跌停状态 | 保留未知及代理标记；按显式股票池/成交规则处理，不把未知改成正常 |
 | 已知退出停牌 | 依配置使用此前最近一条复权收盘记录估值；该记录缺失或无效时仍保留缺口，代理估值不代表实际成交 |
 | 无法恢复的价格及退市退出值 | 个股收益保持 NA，不向退市后无限延续价格，不假定兑付为零 |
@@ -95,8 +137,8 @@ OPENBLAS_NUM_THREADS=1 python3 -m fundamental_factor run --config configs/factor
 
 1. 从完整日历寻找每周／每月首个交易日；先按配置频率定位再截取区间，避免从期中起始时伪造调仓日。截点为入场前一自然日结束，持有至下一期首个交易日开盘。无训练预热和样本划分。
 2. 基础股票池为配置的历史交易所范围，当前为沪深A股，含金融；剔除已知ST、上市不足120个交易日及入场停牌代理。未知 ST 由配置决定，不能与正常股票状态混淆。基准独立于因子和Barra缺失。
-3. 每个因子分别取历史最近快照，保留显式缺失更新，不跨过缺失记录寻找旧非空值。独立样本模式按每个版本所需字段筛选；原始版本只要求有效因子，行业或 Barra 缺失不改变其排名和分组。共同样本模式额外取所选控制字段交集。纯行业模式不要求、筛选或生成实际市值。
-4. 去极值开启时采用中位数 ± `5×1.4826×MAD` 截尾，MAD为零改用1%/99%截尾；标准化开启时以总体标准差标准化。两者均关闭则保留原输入。纯行业中性取行业哑变量及截距的等权OLS残差，等价于行业内去均值；可选市值模式另加个股对数流通市值，全中性再包含20项Barra。QR去除冗余控制列并记录；是否重新标准化残差由开关决定。未来收益不参与这些处理，独立样本模式下中性化失败不影响其它版本。
+3. 每个因子分别取历史最近快照，保留显式缺失更新，不跨过缺失记录寻找旧非空值。独立样本模式按每个版本所需字段筛选；原始版本只要求有效因子，行业、市值或 Barra 缺失不改变其排名和分组。共同样本模式额外取所选控制字段交集。纯行业模式不要求、筛选或生成市值；纯市值模式不要求行业或 Barra。
+4. 去极值开启时采用中位数 ± `5×1.4826×MAD` 截尾，MAD为零改用1%/99%截尾；标准化开启时以总体标准差标准化。两者均关闭则保留原输入。纯行业中性取行业哑变量及截距的等权OLS残差，等价于行业内去均值；纯市值中性取截距及个股对数市值的残差，行业市值中性同时控制两者，全中性再包含20项Barra。市值按配置使用 `history.float_mcap` 或行情代理 `market_cap_proxy`，不混写。QR去除冗余控制列并记录；是否重新标准化残差由开关决定。未来收益不参与这些处理，独立样本模式下中性化失败不影响其它版本。
 5. 按各版本测试信号的平均排名分位 `p=rank_average/N` 分为 `ceil(10p)`，Q1低、Q10高。同值同组，允许空组，不随机拆零值。每个非空组期初等权，冻结后连接未来收益。
 6. 个股收益 `exit_price_level/entry_level−1`，价格口径见冻结配置。标签完整时分组收益为冻结权重加权和；推荐配置缺失部分标签时，在原组内按有效标签对应目标权重归一计算统计均值。退市有真实同尺度终止值时接入，否则个股标签保留缺失。导出 `complete` 表示统计收益可计算，`data_complete` 单独表示标签完整，不混淆两者。
 7. 超额为每期组合收益减独立基准，再单独复利；多空为 `r_Q10−r_Q1`，不除以2。另输出各版本自身测试样本的ALL等权组合，帮助区分因子覆盖与基准差异。报告为费前理论分组收益，披露受限交易比例。

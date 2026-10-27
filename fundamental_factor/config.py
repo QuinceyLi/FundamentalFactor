@@ -67,7 +67,7 @@ class Config:
 
     @property
     def requires_industry(self) -> bool:
-        return any(variant != "raw" for variant in self.variants)
+        return any(variant in {"industry", "industry_size", "full"} for variant in self.variants)
 
     @property
     def requires_risk(self) -> bool:
@@ -75,7 +75,28 @@ class Config:
 
     @property
     def requires_float_mcap(self) -> bool:
-        return "industry_size" in self.variants or ("full" in self.variants and self.include_float_mcap)
+        return self.requires_market_cap and self.market_cap["method"] == "history"
+
+    @property
+    def requires_market_cap(self) -> bool:
+        return any(variant in {"size", "industry_size"} for variant in self.variants) or (
+            "full" in self.variants and self.include_float_mcap)
+
+    @property
+    def market_cap(self) -> dict:
+        # Resolve defaults here, preserving frozen configurations and their digests.
+        return {"method": "history", "quotes_source": "market_cap_quotes", "turnover_source": "quotes",
+                "close_column": "close", "volume_column": "volume", "turnover_column": "turnover",
+                "volume_unit": "lot", "turnover_unit": "percent", "price_basis": "unadjusted"} | (
+                    self.raw.get("neutralization", {}).get("market_cap", {}))
+
+    @property
+    def market_cap_column(self) -> str:
+        return "market_cap_proxy" if self.market_cap["method"] == "quote_proxy" else "float_mcap"
+
+    @property
+    def uses_market_cap_proxy(self) -> bool:
+        return self.requires_market_cap and self.market_cap["method"] == "quote_proxy"
 
     @property
     def data_policy(self) -> dict:
@@ -176,17 +197,47 @@ def load_config(path: str | Path) -> Config:
             raise ValueError("proxy data_policy 需要 description 说明")
     if "neutralization" in raw:
         settings = raw["neutralization"]
-        if (not isinstance(settings, dict) or not settings or set(settings) - {"include_float_mcap", "variants", "sample_policy"}
+        if (not isinstance(settings, dict) or not settings or set(settings) - {"include_float_mcap", "variants", "sample_policy", "market_cap"}
                 or "include_float_mcap" in settings and not isinstance(settings["include_float_mcap"], bool)):
-            raise ValueError("neutralization 仅支持 include_float_mcap、variants 与 sample_policy")
+            raise ValueError("neutralization 仅支持 include_float_mcap、variants、sample_policy 与 market_cap")
         if settings.get("sample_policy", "common") not in ("common", "independent"):
             raise ValueError("neutralization.sample_policy 必须为 common 或 independent")
         if "variants" in settings:
             variants = settings["variants"]
             if (not isinstance(variants, list) or not variants or
-                    any(value not in {"raw", "industry", "industry_size", "full"} for value in variants)
+                    any(value not in {"raw", "size", "industry", "industry_size", "full"} for value in variants)
                     or len(set(variants)) != len(variants)):
                 raise ValueError("neutralization.variants 必须为非空、无重复的有效版本列表")
+        if "market_cap" in settings:
+            cap = settings["market_cap"]
+            allowed = {"method", "quotes_source", "turnover_source", "close_column", "volume_column",
+                       "turnover_column", "volume_unit", "turnover_unit", "price_basis"}
+            if not isinstance(cap, dict) or set(cap) - allowed:
+                raise ValueError("neutralization.market_cap 包含未知参数")
+            if cap.get("method", "history") not in {"history", "quote_proxy"}:
+                raise ValueError("neutralization.market_cap.method 必须为 history 或 quote_proxy")
+            for key, expected in (("volume_unit", "lot"), ("turnover_unit", "percent"),
+                                  ("price_basis", "unadjusted")):
+                if cap.get(key, expected) != expected:
+                    raise ValueError(f"neutralization.market_cap.{key} 必须为 {expected}")
+            for key in ("quotes_source", "turnover_source", "close_column", "volume_column", "turnover_column"):
+                if key in cap and (not isinstance(cap[key], str) or not cap[key].strip()):
+                    raise ValueError(f"neutralization.market_cap.{key} 必须为非空字段或来源名称")
+            if cap.get("close_column", "close").lower() in {"acc_close", "acc_open"}:
+                raise ValueError("市值代理必须使用未复权 close，不能使用 acc_close/acc_open")
+            proxy_columns = [cap.get("close_column", "close"), cap.get("volume_column", "volume"),
+                             cap.get("turnover_column", "turnover")]
+            if any(column.lower() in {"date", "code"} for column in proxy_columns):
+                raise ValueError("市值代理数值字段不能使用 date/code 键列")
+            if cap.get("close_column", "close") == cap.get("volume_column", "volume"):
+                raise ValueError("市值代理的 close_column 与 volume_column 不可相同")
+            if (cap.get("quotes_source", "market_cap_quotes") == cap.get("turnover_source", "quotes")
+                    and len(set(proxy_columns)) != 3):
+                raise ValueError("市值代理同源时 close_column、volume_column 与 turnover_column 必须互异")
+            if cap.get("method", "history") == "quote_proxy":
+                for key, default in (("quotes_source", "market_cap_quotes"), ("turnover_source", "quotes")):
+                    if cap.get(key, default) not in raw["sources"]:
+                        raise ValueError(f"市值代理来源 {cap.get(key, default)} 必须在 sources 中定义；缺失数据可显式设为 null")
     if "universe" in raw:
         settings = raw["universe"]
         if not isinstance(settings, dict) or set(settings) != {"exchanges"}:

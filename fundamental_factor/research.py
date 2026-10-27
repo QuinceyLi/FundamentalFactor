@@ -162,6 +162,7 @@ def run_research(config: Config) -> dict:
         card["rebalance_frequency"] = config.rebalance_frequency
         card["preprocess"] = {"winsorize": config.raw["preprocess"].get("winsorize", True),
                               "standardize": config.raw["preprocess"].get("standardize", True)}
+        card["market_cap"] = config.market_cap if config.requires_market_cap else None
         card["artifacts"] = artifacts
         card["data_policy"] = config.data_policy
         card["price_contract"] = config.raw.get("price_contract", {})

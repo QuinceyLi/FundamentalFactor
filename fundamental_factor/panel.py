@@ -9,6 +9,7 @@ from .audit import audit, source_columns
 from .config import Config, DataGateError, RISK_FIELDS
 from .data import asof_snapshot, columns, fingerprint, read_frame, write_json
 from .preprocess import prepare_signals
+from .market_cap import PROXY_COLUMNS, market_cap_snapshot
 
 
 def _status_frame(config: Config) -> pd.DataFrame:
@@ -61,6 +62,8 @@ def weekly_calendar(calendar: pd.Series, start: pd.Timestamp, end: pd.Timestamp,
 def _panel_calculation_version(config: Config) -> int:
     # Keep existing weekly/common/preprocessed caches reproducible. A new
     # sampling, transformation or frequency contract cannot reuse version 3.
+    if config.uses_market_cap_proxy or "size" in config.variants:
+        return 5
     preprocessing = config.raw["preprocess"]
     legacy = (config.rebalance_frequency == "weekly" and config.sample_policy == "common"
               and preprocessing.get("winsorize", True) and preprocessing.get("standardize", True))
@@ -148,14 +151,18 @@ def signal_panel(config: Config, weeks: pd.DataFrame, base: pd.DataFrame | None 
     else:
         controls = base.copy()
         controls["risk_date"] = pd.NaT
+    if config.uses_market_cap_proxy:
+        controls = market_cap_snapshot(config, controls)
+    cap_column = config.market_cap_column
     controls["industry"] = controls.industry.replace(r"^\s*$", np.nan, regex=True)
-    numeric_columns = (["float_mcap"] if config.requires_float_mcap else []) + (RISK_FIELDS if config.requires_risk else [])
+    numeric_columns = ([cap_column] if config.requires_market_cap else []) + (RISK_FIELDS if config.requires_risk else [])
     numeric_ok = np.isfinite(controls[numeric_columns].to_numpy(dtype=float)).all(axis=1)
     controls["controls_ok"] = numeric_ok
     if config.requires_industry:
         controls["controls_ok"] &= controls.industry.notna()
-    if config.requires_float_mcap:
-        controls["controls_ok"] &= controls.float_mcap.gt(0)
+    if config.requires_market_cap:
+        controls["market_cap_available"] = np.isfinite(controls[cap_column]) & controls[cap_column].gt(0)
+        controls["controls_ok"] &= controls.market_cap_available
     controls.to_parquet(config.output / "controls.parquet", index=False)
     blocks, coverage, failures = [], [], []
     for factor in config.factors:
@@ -180,6 +187,9 @@ def signal_panel(config: Config, weeks: pd.DataFrame, base: pd.DataFrame | None 
         counts["common_coverage"] = counts.common_count / denominator
         counts["unknown_st_fraction"] = counts.unknown_st_count / denominator
         counts["unknown_suspension_fraction"] = counts.unknown_suspension_count / denominator
+        if config.requires_market_cap:
+            counts["market_cap_available"] = joined.groupby("entry").market_cap_available.sum().reindex(counts.index, fill_value=0)
+            counts["market_cap_coverage"] = counts.market_cap_available / denominator
         selected = joined[joined.common_ok if config.sample_policy == "common" else joined.factor_ok].copy()
         zero = selected.value.eq(0).groupby(selected.entry).mean()
         ties = selected.groupby("entry").value.apply(lambda s: s.duplicated(keep=False).mean())
@@ -188,7 +198,8 @@ def signal_panel(config: Config, weeks: pd.DataFrame, base: pd.DataFrame | None 
         signals, diagnostics = prepare_signals(selected, config.raw["preprocess"],
                                                include_float_mcap=include_float_mcap,
                                                variants=config.variants,
-                                               sample_policy=config.sample_policy)
+                                               sample_policy=config.sample_policy,
+                                               market_cap_column=cap_column)
         for variant in config.variants:
             variant_counts = signals.loc[signals.variant.eq(variant)].groupby("entry").size()
             counts[f"variant_{variant}_count"] = variant_counts.reindex(counts.index, fill_value=0)
@@ -202,6 +213,8 @@ def signal_panel(config: Config, weeks: pd.DataFrame, base: pd.DataFrame | None 
                 "variant", "signal", "percentile", "group", "industry", "is_st_unknown", "entry_suspension_unknown"]
         if config.requires_float_mcap:
             keep.append("float_mcap")
+        if config.uses_market_cap_proxy:
+            keep.extend(PROXY_COLUMNS)
         blocks.append(signals[keep])
     return pd.concat(blocks, ignore_index=True), pd.concat(coverage, ignore_index=True), pd.concat(failures, ignore_index=True)
 
@@ -210,7 +223,9 @@ def make_labels(config: Config, features: pd.DataFrame) -> pd.DataFrame:
     required = source_columns(config)
     price = config.raw["price_contract"]
     classic = config.data_policy["mode"] == "classic"
-    quotes = read_frame(config.source("quotes"), required["quotes"])
+    # Cap-proxy inputs are not needed for forward return construction.
+    quotes = read_frame(config.source("quotes"), ["date", "code", price.get("open_column", "acc_open"),
+                                                  price.get("close_column", "acc_close")])
     quotes = quotes.rename(columns={price.get("open_column", "acc_open"): "open_level",
                                     price.get("close_column", "acc_close"): "close_level"})
     status = _status_frame(config)
@@ -332,6 +347,7 @@ def build_panel(config: Config) -> dict:
                 "weeks": len(weeks), "signal_rows": len(features), "base_rows": len(base),
                 "periods": len(weeks), "rebalance_frequency": config.rebalance_frequency,
                 "sample_policy": config.sample_policy,
+                "market_cap": config.market_cap if config.requires_market_cap else None,
                 "unknown_st_base_rows": int(base.is_st_unknown.sum()),
                 "unknown_suspension_base_rows": int(base.entry_suspension_unknown.sum()),
                 "signal_start": weeks.cutoff.min(), "signal_end": weeks.cutoff.max(),

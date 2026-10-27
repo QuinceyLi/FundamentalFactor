@@ -21,6 +21,18 @@ def optional_columns(path: Path | None) -> list[str]:
         return []
 
 
+def market_cap_source_columns(config: Config) -> dict[str, list[str]]:
+    """Proxy inputs share normal source keys, including the core quotes source."""
+    if not config.uses_market_cap_proxy:
+        return {}
+    spec = config.market_cap
+    result = {spec["quotes_source"]: [spec["close_column"], spec["volume_column"]]}
+    result.setdefault(spec["turnover_source"], [])
+    if spec["turnover_column"] not in result[spec["turnover_source"]]:
+        result[spec["turnover_source"]].append(spec["turnover_column"])
+    return result
+
+
 def source_columns(config: Config) -> dict[str, list[str]]:
     price = config.raw["price_contract"]
     classic = config.data_policy["mode"] == "classic"
@@ -57,6 +69,10 @@ def source_columns(config: Config) -> dict[str, list[str]]:
                 "corporate_actions": ["date", "code", "share_ratio", "cash_per_share", "notice_date"],
                 "execution_terminal": ["date", "code", "cash_per_share", "available_date"],
             })
+    for name, fields in market_cap_source_columns(config).items():
+        available = optional_columns(config.source(name)) if config.optional_control_sources else fields
+        result.setdefault(name, ["date", "code"])
+        result[name].extend(field for field in fields if field in available and field not in result[name])
     for factor in config.factors:
         name = factor["source"]
         if name in {"quotes", "risk", "stocks", "history", "calendar", "status", "terminal",
@@ -118,7 +134,17 @@ def audit(config: Config) -> dict:
         optional.add("history")
     if config.optional_control_sources:
         optional.update({"history", "risk"})
-        result["warnings"].append("各信号版本独立取样：原始版本不要求行业或Barra；控制数据缺失仅影响需要它们的中性化版本。版本间表现差异也可能来自样本差异。")
+        required_names = {"quotes", "stocks", "calendar"} | {factor["source"] for factor in config.factors}
+        if config.raw.get("execution", {}).get("enabled"):
+            required_names.update(execution_names)
+        optional.update(set(market_cap_source_columns(config)) - required_names)
+        result["warnings"].append("各信号版本独立取样：原始版本不要求行业、市值或Barra；控制数据缺失仅影响需要它们的中性化版本。版本间表现差异也可能来自样本差异。")
+    proxy_fields = market_cap_source_columns(config)
+    if config.uses_market_cap_proxy:
+        result["market_cap"] = {**config.market_cap, "column": config.market_cap_column,
+                                "formula": "close * volume * 100 / (turnover / 100)",
+                                "is_proxy": True}
+        result["warnings"].append("市值中性化使用未复权收盘价 × 成交量(手) × 100 ÷ (换手率(%) / 100) 的行情代理；不声称等同已验证的实际流通市值。仅配对同日且截点前的原始价格/成交量/换手率，非正或非有限输入按缺失处理。")
 
     def blocking(name: str, message: str) -> None:
         result["execution_blocking" if name in execution_names else "blocking"].append(message)
@@ -138,6 +164,8 @@ def audit(config: Config) -> dict:
                 result["warnings"].append(f"可选 {name} 数据未提供；保留未知状态或缺失收益披露，不阻断因子统计。")
                 if config.optional_control_sources and name in ("history", "risk"):
                     result["warnings"].append(f"{name} 控制数据不可用：需要这些字段的中性化版本将记录无有效样本；原始版本继续。")
+                if config.optional_control_sources and name in proxy_fields:
+                    result["warnings"].append(f"{name} 市值代理来源不可用：需要市值的版本无有效代理值；原始版本继续。")
             continue
         try:
             available = columns(path)
@@ -149,6 +177,9 @@ def audit(config: Config) -> dict:
                             (["float_mcap"] if config.requires_float_mcap else []))
                 if absent := set(expected) - set(available):
                     result["warnings"].append(f"{name} 缺少控制字段 {sorted(absent)}；仅影响需要这些字段的版本，原始版本不因此删除股票。")
+            if config.optional_control_sources and name in proxy_fields:
+                if absent := set(proxy_fields[name]) - set(available):
+                    result["warnings"].append(f"{name} 缺少市值代理字段 {sorted(absent)}；仅影响需要市值的版本，原始版本不因此删除股票。")
             selected = required + (["is_a_share"] if name == "stocks" and "is_a_share" in available else [])
             frame = read_frame(path, selected, nullable_booleans=(name == "execution_status" or
                                 relaxed and name in ("history", "status")))

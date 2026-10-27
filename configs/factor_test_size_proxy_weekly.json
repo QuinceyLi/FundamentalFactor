@@ -1,0 +1,107 @@
+{
+  "schema_version": 2,
+  "data_root": "/data/mongo",
+  "output_dir": "../outputs/factor_test_size_proxy_weekly",
+  "dataset_kind": "observed",
+  "classification_workbook": "/home/liqinghua/.codex/attachments/413d870c-c9f9-4abc-936a-cbe2822ef3a4/因子分类.xlsx",
+  "factors": [
+    {
+      "name": "ROIC_new",
+      "label": "ROIC",
+      "source": "roic",
+      "column": "ROIC_new"
+    },
+    {
+      "name": "fundnum_promotion",
+      "label": "公募持仓变化",
+      "source": "fund",
+      "column": "fundnum_promotion"
+    }
+  ],
+  "sources": {
+    "roic": "fs_quality_fnew.feather",
+    "fund": "alternative_fundnum_promotion.feather",
+    "quotes": "quotefac_repaired.feather",
+    "risk": "risk_barra.feather",
+    "stocks": "public_stock_master_sh_sz.feather",
+    "history": "stock_history_proxy.feather",
+    "calendar": "public_trade_calendar_sina.feather",
+    "status": "stock_trade_status_proxy.feather",
+    "terminal": null,
+    "execution_quotes": null,
+    "execution_status": null,
+    "corporate_actions": null,
+    "execution_terminal": null,
+    "market_cap_quotes": "/home/liqinghua/FundamentalFactor/outputs/gfoptim_inputs/raw_quotes.parquet"
+  },
+  "point_in_time_confirmed": true,
+  "point_in_time_evidence": "用户确认明细文件 date 表示当时已公开可用的快照；审计核对历史快照时序，不额外统一施加财报披露滞后。",
+  "price_contract": {
+    "verified": true,
+    "total_return": false,
+    "suspended_total_return": false,
+    "return_kind": "adjusted_price",
+    "suspension_valuation": "previous_adjusted_close",
+    "open_column": "acc_open",
+    "close_column": "acc_close",
+    "description": "使用独立修复版本 quotefac_repaired：原始报价多源核对，修复000001.SZ 2025-05-28复权倍率断点，保留其余未证伪事件。收益为复权开盘价格比，未宣称涵盖全部公司行动的经济全收益。退出停牌沿用最近复权收盘估值。"
+  },
+  "backtest": {
+    "min_listing_sessions": 120,
+    "start_date": null,
+    "end_date": null,
+    "rebalance_frequency": "weekly"
+  },
+  "preprocess": {
+    "mad_multiplier": 5.0,
+    "mad_normalizer": 1.4826,
+    "fallback_quantiles": [
+      0.01,
+      0.99
+    ],
+    "rank_tolerance": 1e-10,
+    "winsorize": false,
+    "standardize": false
+  },
+  "metrics": {
+    "annualization": 52,
+    "nw_lag": 13
+  },
+  "execution": {
+    "enabled": false,
+    "description": "主报告使用冻结等权理论持仓；完整公司行动及实际退市现金不是 IC/分组统计门槛。"
+  },
+  "neutralization": {
+    "variants": [
+      "raw",
+      "size"
+    ],
+    "sample_policy": "independent",
+    "include_float_mcap": false,
+    "market_cap": {
+      "method": "quote_proxy",
+      "quotes_source": "market_cap_quotes",
+      "turnover_source": "quotes",
+      "close_column": "close",
+      "volume_column": "volume",
+      "turnover_column": "turnover",
+      "volume_unit": "lot",
+      "turnover_unit": "percent",
+      "price_basis": "unadjusted"
+    }
+  },
+  "universe": {
+    "exchanges": [
+      "SH",
+      "SZ"
+    ]
+  },
+  "data_policy": {
+    "mode": "classic",
+    "st_unknown": "include",
+    "suspension_unknown": "include",
+    "missing_returns": "available_case",
+    "description": "ST 采用深交所官方简称变更历史，首次事件前及未覆盖上海代码保持未知并纳入研究；停牌采用 GF 的 volume==0 或 close==0，当日全日数据仅作研究过滤。涨跌停用历史板块比例、已知 ST 及除权参考价估计，仅作限制诊断。行业沿用 on_all_temp 历史 class 原始类别；未将今日行业倒填历史，class35 为混合类别。 经典因子统计口径：ST或停牌状态未知不阻断计算、不宣称可成交；有有效价格即保留收益，无法确定的收益保留缺失。 组合和基准采用Qlib式有效收益样本均值；冻结目标权重与收益统计权重分别记录。并列形成的空组按零利息现金处理；全部信号缺失或非空组全缺收益不补零。",
+    "empty_groups": "cash"
+  }
+}

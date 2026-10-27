@@ -33,13 +33,20 @@ def winsorize(values: np.ndarray, settings: dict | None = None) -> tuple[np.ndar
 
 
 def control_matrix(frame: pd.DataFrame, full: bool = False, *,
-                   include_float_mcap: bool = True) -> tuple[np.ndarray, list[str]]:
-    industry = pd.get_dummies(frame.industry, prefix="industry", drop_first=True, dtype=float)
-    parts = [np.ones((len(frame), 1)), industry.to_numpy()]
-    names = ["intercept"] + industry.columns.tolist()
+                   include_float_mcap: bool = True, market_cap_column: str = "float_mcap",
+                   include_industry: bool = True) -> tuple[np.ndarray, list[str]]:
+    parts = [np.ones((len(frame), 1))]
+    names = ["intercept"]
+    if include_industry:
+        industry = pd.get_dummies(frame.industry, prefix="industry", drop_first=True, dtype=float)
+        parts.append(industry.to_numpy())
+        names.extend(industry.columns.tolist())
     if include_float_mcap:
-        parts.append(standardize(np.log(frame.float_mcap.to_numpy()))[:, None])
-        names.append("log_float_mcap")
+        capital = frame[market_cap_column].to_numpy(dtype=float)
+        if not np.isfinite(capital).all() or (capital <= 0).any():
+            raise ValueError(f"{market_cap_column} must be finite and positive")
+        parts.append(standardize(np.log(capital))[:, None])
+        names.append(f"log_{market_cap_column}")
     if full:
         parts.extend(standardize(frame[col].to_numpy())[:, None] for col in RISK_FIELDS)
         names.extend(RISK_FIELDS)
@@ -63,7 +70,8 @@ def neutralize(values: np.ndarray, controls: np.ndarray, names: list[str],
 def prepare_signals(frame: pd.DataFrame, settings: dict | None = None, *,
                     include_float_mcap: bool = True,
                     variants: list[str] | None = None,
-                    sample_policy: str = "common") -> tuple[pd.DataFrame, pd.DataFrame]:
+                    sample_policy: str = "common",
+                    market_cap_column: str = "float_mcap") -> tuple[pd.DataFrame, pd.DataFrame]:
     """Transform precomputed factors without using realized returns.
 
     The legacy common policy requires a complete shared sample. Independent
@@ -76,14 +84,16 @@ def prepare_signals(frame: pd.DataFrame, settings: dict | None = None, *,
             raise ValueError(f"preprocess.{option} must be boolean")
     if sample_policy not in {"common", "independent"}:
         raise ValueError("sample_policy must be common or independent")
+    if not isinstance(market_cap_column, str) or not market_cap_column:
+        raise ValueError("market_cap_column must be a nonempty column name")
     variants = list(variants if variants is not None else
                     (VARIANTS if include_float_mcap else ["raw", "industry", "full"]))
     if (not variants or len(set(variants)) != len(variants) or
-            set(variants) - {"raw", "industry", "industry_size", "full"}):
+            set(variants) - {"raw", "size", "industry", "industry_size", "full"}):
         raise ValueError("variants must be nonempty unique supported transformations")
-    needs_industry = any(v != "raw" for v in variants)
-    needs_cap = "industry_size" in variants or ("full" in variants and include_float_mcap)
-    numeric_columns = ["value"] + (["float_mcap"] if needs_cap else []) + (RISK_FIELDS if "full" in variants else [])
+    needs_industry = any(v in {"industry", "industry_size", "full"} for v in variants)
+    needs_cap = bool({"size", "industry_size"} & set(variants)) or ("full" in variants and include_float_mcap)
+    numeric_columns = ["value"] + ([market_cap_column] if needs_cap else []) + (RISK_FIELDS if "full" in variants else [])
     required = ["entry", "exit", "code"] + (["industry"] if needs_industry else []) + numeric_columns
     if sample_policy == "independent":
         required = ["entry", "exit", "code", "value"]
@@ -103,8 +113,10 @@ def prepare_signals(frame: pd.DataFrame, settings: dict | None = None, *,
         return values, method
 
     def transform_neutral(values, group, variant):
-        use_cap = variant == "industry_size" or (variant == "full" and include_float_mcap)
-        controls, names = control_matrix(group, variant == "full", include_float_mcap=use_cap)
+        use_cap = variant in {"size", "industry_size"} or (variant == "full" and include_float_mcap)
+        controls, names = control_matrix(group, variant == "full", include_float_mcap=use_cap,
+                                        market_cap_column=market_cap_column,
+                                        include_industry=variant != "size")
         residual, info = neutralize(values, controls, names, settings["rank_tolerance"])
         if settings.get("standardize", True):
             residual = standardize(residual, settings["rank_tolerance"])
@@ -131,9 +143,10 @@ def prepare_signals(frame: pd.DataFrame, settings: dict | None = None, *,
         if sample_policy == "independent":
             finite_factor = np.isfinite(group.value.to_numpy(dtype=float))
             for variant in variants:
-                use_cap = variant == "industry_size" or (variant == "full" and include_float_mcap)
-                numeric = (["float_mcap"] if use_cap else []) + (RISK_FIELDS if variant == "full" else [])
-                columns = numeric + (["industry"] if variant != "raw" else [])
+                use_cap = variant in {"size", "industry_size"} or (variant == "full" and include_float_mcap)
+                use_industry = variant in {"industry", "industry_size", "full"}
+                numeric = ([market_cap_column] if use_cap else []) + (RISK_FIELDS if variant == "full" else [])
+                columns = numeric + (["industry"] if use_industry else [])
                 missing = set(columns) - set(group)
                 if missing:
                     diagnostics.append({"entry": entry, "variant": variant, "status": "failed",
@@ -144,8 +157,8 @@ def prepare_signals(frame: pd.DataFrame, settings: dict | None = None, *,
                 if numeric:
                     valid &= np.isfinite(group[numeric].to_numpy(dtype=float)).all(axis=1)
                 if use_cap:
-                    valid &= group.float_mcap.gt(0).to_numpy()
-                if variant != "raw":
+                    valid &= group[market_cap_column].gt(0).to_numpy()
+                if use_industry:
                     valid &= group.industry.astype("string").str.strip().ne("").fillna(False).to_numpy(dtype=bool)
                 selected = group.loc[valid].copy()
                 if selected.empty:
@@ -167,7 +180,7 @@ def prepare_signals(frame: pd.DataFrame, settings: dict | None = None, *,
             continue
         numeric = group[numeric_columns].to_numpy(dtype=float)
         if (not np.isfinite(numeric).all() or (needs_industry and group.industry.isna().any())
-                or (needs_cap and group.float_mcap.le(0).any())):
+                or (needs_cap and group[market_cap_column].le(0).any())):
             raise ValueError("prepare_signals requires a frozen complete common sample")
         raw, method = transform_base(group.value.to_numpy())
         transformed = {"raw": raw}

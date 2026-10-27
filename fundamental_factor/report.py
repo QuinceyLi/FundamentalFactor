@@ -18,7 +18,7 @@ VARIANTS = {"raw": "原始信号", "industry_size": "行业市值中性化信号
 
 
 def _variant_labels(config: dict | None = None, values=()) -> dict:
-    all_labels = VARIANTS | {"industry": "行业中性化信号"}
+    all_labels = VARIANTS | {"industry": "行业中性化信号", "size": "市值中性化信号"}
     preprocessing = (config or {}).get("preprocess", {})
     if not preprocessing.get("winsorize", True) and not preprocessing.get("standardize", True):
         all_labels["raw"] = "原样输入信号"
@@ -97,6 +97,7 @@ LABELS = {
     "entry": "入场日", "exit": "退出日", "factor": "因子", "base_count": "基准股票数",
     "factor_available": "因子有效股票数", "common_count": "所选信号共同样本数", "raw_coverage": "原始覆盖率",
     "common_coverage": "共同样本覆盖率", "missing_factor": "缺失因子数", "missing_controls": "缺失控制数",
+    "market_cap_available": "市值控制有效股票数", "market_cap_coverage": "市值控制覆盖率",
     "zero_fraction": "零值比例", "tie_fraction": "并列值比例", "n_stocks": "股票数", "reason": "原因",
     "calendar_weeks": "日历周数", "valid_return_weeks": "有效收益周数", "empty_weeks": "空组/空腿周数",
     "missing_return_weeks": "缺失收益周数", "mean_stocks": "平均股票数", "min_stocks": "最少股票数",
@@ -118,6 +119,7 @@ LABELS = {
     "return_method": "收益统计方法", "target_turnover": "目标双边换手率",
 }
 PERCENT = {
+    "market_cap_coverage",
     "ic_mean", "ic_std", "win_rate", "nw_lower", "nw_upper", "total_return", "annual_return",
     "annual_volatility", "max_drawdown", "annual_turnover", "excess_total_return", "excess_annual_return",
     "excess_annual_volatility", "excess_win_rate", "excess_max_drawdown", "raw_coverage", "common_coverage",
@@ -129,7 +131,7 @@ PERCENT = {
     "annual_target_turnover", "target_turnover", "mean_missing_weight", "max_missing_weight",
     "mean_evaluation_weight", "missing_weight", "evaluation_weight_sum", "cash_weight",
 }
-for _variant, _label in (VARIANTS | {"industry": "行业中性化信号"}).items():
+for _variant, _label in (VARIANTS | {"industry": "行业中性化信号", "size": "市值中性化信号"}).items():
     LABELS[f"variant_{_variant}_count"] = f"{_label}测试股票数"
     LABELS[f"variant_{_variant}_coverage"] = f"{_label}测试覆盖率"
     PERCENT.add(f"variant_{_variant}_coverage")
@@ -423,14 +425,25 @@ def _definitions(config: dict) -> str:
     tolerance = preprocess["rank_tolerance"]
     universe = _universe_label(config)
     variants = _variant_labels(config)
-    include_cap = ("industry_size" in variants or
-                   ("full" in variants and config.get("neutralization", {}).get("include_float_mcap", True)))
-    neutral_definition = ("行业市值中性使用行业和个股实际流通市值的自然对数" if include_cap else
-                          "纯行业中性仅使用行业标签和截距，不需要行业市值或个股实际市值")
+    neutralization = config.get("neutralization", {})
+    include_cap = ("size" in variants or "industry_size" in variants or
+                   ("full" in variants and neutralization.get("include_float_mcap", True)))
+    cap_config = neutralization.get("market_cap", {})
+    proxy_cap = cap_config.get("method", "history") == "quote_proxy"
+    cap_label = "行情代理市值" if proxy_cap else "个股实际流通市值"
+    neutral_definitions = []
+    if "industry" in variants:
+        neutral_definitions.append("纯行业中性仅使用行业标签和截距，不需要行业市值或个股实际市值")
+    if "size" in variants:
+        neutral_definitions.append(f"纯市值中性仅使用截距和{cap_label}的自然对数，不要求行业或 Barra 风险暴露")
+    if "industry_size" in variants:
+        neutral_definitions.append(f"行业市值中性使用行业和{cap_label}的自然对数")
+    if "full" in variants:
+        controls = f"行业、{cap_label}的自然对数" if neutralization.get("include_float_mcap", True) else "行业"
+        neutral_definitions.append(f"全中性使用{controls}及冻结配置的全部 {len(risk_fields)} 项 Barra 暴露")
+    neutral_definition = "；".join(neutral_definitions)
     if set(variants) == {"raw"}:
         neutral_definition = "本次只测试原始信号，不要求行业、市值或 Barra 风险暴露"
-    elif "full" in variants:
-        neutral_definition += f"；全中性再加入冻结配置的全部 {len(risk_fields)} 项 Barra 暴露"
     selected_label = "、".join(variants.values())
     preprocessing_steps = []
     if preprocess.get("winsorize", True):
@@ -446,7 +459,7 @@ def _definitions(config: dict) -> str:
         preprocess_definition += " raw 直接使用输入因子值，signal=value；不改变真实零值、负值或原始尺度。"
     else:
         preprocess_definition += " raw 表示未中性化版本，仍包含上述已开启的预处理，并非输入值原样通过。"
-    sample_definition = (f"本次选择{selected_label}。各版本独立筛选所需输入；raw 只要求有效因子值，不受行业或 Barra 缺失影响。"
+    sample_definition = (f"本次选择{selected_label}。各版本独立筛选所需输入；raw 只要求有效因子值，不受行业、市值或 Barra 缺失影响。"
                          "中性化版本仅使用自身所需控制完整的股票，失败不会删除其它版本的信号。各版本收益差异可能同时来自处理方式和样本差异；控制字段交集仅作覆盖诊断。"
                          if _independent_samples(config) else
                          f"本次选择{selected_label}。每个因子的所选信号使用相同股票样本以便比较；这项比较规则不是原始等权回测对行业或市值的数学要求。不同因子的覆盖率可以不同。")
@@ -510,6 +523,22 @@ def _definitions(config: dict) -> str:
                      "这是一项显式组合约定。整周无信号或非空组全部缺失收益不属于空组现金，不补零。")
     if "full" in variants:
         items.append("全中性使用的风险暴露：" + "、".join(str(field) for field in risk_fields) + "。")
+    if include_cap and proxy_cap:
+        close_column = cap_config.get("close_column", "close")
+        volume_column = cap_config.get("volume_column", "volume")
+        turnover_column = cap_config.get("turnover_column", "turnover")
+        items.append(f"市值代理公式：{close_column} * {volume_column} * 100 / ({turnover_column} / 100)。"
+                     "close 使用未复权收盘价；volume 单位为手（1 手=100 股），turnover 为百分数（1 表示 1%）。"
+                     "不能用复权收盘价代入；该代理不是已核验的实际流通市值，与 history.float_mcap 分开存储。")
+        items.append(f"市值代理时点：{cap_config.get('quotes_source', 'market_cap_quotes')} 的收盘价及成交量，"
+                     f"与 {cap_config.get('turnover_source', 'quotes')} 的换手率先按同一天 date/code 连接，"
+                     "再取调仓截点前最近一条记录，禁止使用调仓当日完整成交信息；market_cap_date 记录对应日期，"
+                     "market_cap_proxy 记录代理值。最新记录无效时不越过它回取更旧有效值。")
+        items.append("市值代理输入及计算结果必须均为有限正数；零、负数、缺失和无穷值保留为缺失，不补零。"
+                     "中性化使用 log(market_cap_proxy)，在独立样本模式下，代理缺失只影响需要市值的版本。")
+    elif include_cap:
+        items.append("市值来源为 history.float_mcap，要求实际流通市值；缺省 market_cap.method=history。"
+                     "Barra SIZE、加工后的 tmv 或规模分档不能冒充实际流通市值；行情代理须显式选择 quote_proxy。")
     if backtest.get("start_date") or backtest.get("end_date"):
         items.append(f"配置的信号入场日期范围：{backtest.get('start_date') or '不限'} 至 {backtest.get('end_date') or '不限'}；实际首末持有期见样本信息。")
     items.append("因子更新频率与调仓频率分别确定；每次调仓取截点前最近一条记录，不对因子做周/月平均。date 必须是实际可用日期，最新记录为空时不越过它寻找旧值。")
