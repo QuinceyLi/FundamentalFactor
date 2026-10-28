@@ -1,0 +1,119 @@
+{
+  "schema_version": 2,
+  "data_root": "/data/mongo",
+  "output_dir": "../outputs/factor_test_aiq_weekly_ema_aiq_matrix_20261028",
+  "dataset_kind": "observed",
+  "classification_workbook": "/home/liqinghua/.codex/attachments/413d870c-c9f9-4abc-936a-cbe2822ef3a4/因子分类.xlsx",
+  "factors": [
+    {
+      "name": "ROIC_new",
+      "label": "ROIC",
+      "source": "roic",
+      "column": "ROIC_new"
+    },
+    {
+      "name": "fundnum_promotion",
+      "label": "公募持仓变化",
+      "source": "fund",
+      "column": "fundnum_promotion"
+    }
+  ],
+  "sources": {
+    "roic": "fs_quality_fnew.feather",
+    "fund": "alternative_fundnum_promotion.feather",
+    "quotes": "quotefac_repaired.feather",
+    "risk": "risk_barra.feather",
+    "stocks": "/home/liqinghua/FundamentalFactor/outputs/aiq_inputs_20261028/stock_master.parquet",
+    "history": "/home/liqinghua/FundamentalFactor/outputs/aiq_inputs_20261028/st_history.parquet",
+    "calendar": "/home/liqinghua/FundamentalFactor/outputs/aiq_inputs_20261028/trade_calendar.parquet",
+    "status": "/home/liqinghua/FundamentalFactor/outputs/aiq_matrix_inputs_20261028/trade_status.parquet",
+    "terminal": null,
+    "execution_quotes": null,
+    "execution_status": null,
+    "corporate_actions": null,
+    "execution_terminal": null,
+    "industry": "/home/liqinghua/FundamentalFactor/outputs/aiq_inputs_20261028/industry/stock_industry.parquet",
+    "float_mcap": "/home/liqinghua/FundamentalFactor/outputs/aiq_inputs_20261028/market_cap/float_mcap.parquet"
+  },
+  "point_in_time_confirmed": true,
+  "point_in_time_evidence": "用户确认明细文件 date 表示当时已公开可用的快照；审计核对历史快照时序，不额外统一施加财报披露滞后。",
+  "price_contract": {
+    "verified": true,
+    "total_return": false,
+    "suspended_total_return": false,
+    "return_kind": "adjusted_price",
+    "suspension_valuation": "aiq_field_rules",
+    "open_column": "acc_open",
+    "close_column": "acc_close",
+    "description": "保留quotefac_repaired已修复复权收益主源。AIQ矩阵缺失规则按字段实施：acc_open沿用自身历史开盘，raw open保留空值；仅处理NaN，不把0/负/无穷变成可跳过缺失。保留原值、填充与真实供值日，不将上市前供值或退市后无观察价格当有效成交/清算。收益仍为复权价格变化，未认证全公司行动现金全收益。"
+  },
+  "backtest": {
+    "min_listing_sessions": 120,
+    "start_date": null,
+    "end_date": null,
+    "rebalance_frequency": "weekly"
+  },
+  "preprocess": {
+    "mad_multiplier": 5.0,
+    "mad_normalizer": 1.4826,
+    "fallback_quantiles": [
+      0.01,
+      0.99
+    ],
+    "rank_tolerance": 1e-10,
+    "winsorize": false,
+    "standardize": false
+  },
+  "metrics": {
+    "annualization": 52,
+    "nw_lag": 13,
+    "turnover_warning_threshold": 0.5
+  },
+  "execution": {
+    "enabled": false,
+    "description": "主报告使用冻结等权理论持仓；完整公司行动及实际退市现金不是 IC/分组统计门槛。"
+  },
+  "neutralization": {
+    "variants": [
+      "raw",
+      "industry",
+      "size",
+      "industry_size"
+    ],
+    "sample_policy": "independent",
+    "include_float_mcap": true,
+    "market_cap": {
+      "method": "history",
+      "source": "float_mcap",
+      "column": "float_mcap"
+    }
+  },
+  "universe": {
+    "exchanges": [
+      "SH",
+      "SZ"
+    ]
+  },
+  "data_policy": {
+    "mode": "classic",
+    "st_unknown": "include",
+    "suspension_unknown": "include",
+    "missing_returns": "available_case",
+    "description": "本次missing_values.method=aiq_matrix，统一AIQ字段矩阵的zero/keep/ffill/last；因子、行业和市值前填均保留原值及供值日期，0/负/无穷不被旧有效值覆盖。ST按事件含取消及来源到期未知独立处理。停牌代理由补缺后的原始成交量/收盘推导，开盘限制仍是代理。信号截点和股票生命周期独立约束；不把未知退市现金或缺失周/月收益普遍补0。组内部分标签按available_case统计，原始缺失与填充覆盖分别披露。",
+    "empty_groups": "cash"
+  },
+  "industry": {
+    "classification": "aiq_zx35",
+    "source": "industry",
+    "column": "industry"
+  },
+  "smoothing": {
+    "method": "ema",
+    "span": 4,
+    "min_periods": 1
+  },
+  "input_manifest": "/home/liqinghua/FundamentalFactor/outputs/aiq_matrix_inputs_20261028/manifest.json",
+  "missing_values": {
+    "method": "aiq_matrix"
+  }
+}

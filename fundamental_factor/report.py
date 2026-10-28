@@ -22,6 +22,8 @@ def _variant_labels(config: dict | None = None, values=()) -> dict:
     preprocessing = (config or {}).get("preprocess", {})
     if not preprocessing.get("winsorize", True) and not preprocessing.get("standardize", True):
         all_labels["raw"] = "原样输入信号"
+    if (config or {}).get("smoothing", {}).get("method", "none") == "ema":
+        all_labels["raw"] = "未中性化平滑信号"
     industry_only = (config or {}).get("neutralization", {}).get("include_float_mcap", True) is False
     if industry_only or "industry" in values:
         labels = {name: all_labels[name] for name in ("raw", "industry", "full")}
@@ -117,8 +119,22 @@ LABELS = {
     "data_complete": "标签完整", "missing_weight": "缺失标签目标权重",
     "evaluation_weight_sum": "统计权重合计", "cash_weight": "现金目标权重",
     "return_method": "收益统计方法", "target_turnover": "目标双边换手率",
+    "sharpe_ratio": "夏普（零参考）", "sharpe_n_periods": "夏普有效期数",
+    "excess_sharpe": "超额夏普", "excess_sharpe_n_periods": "超额夏普有效期数",
+    "turnover_one_way": "单边换手率", "target_turnover_one_way": "目标单边换手率",
+    "initial_build": "首次建仓", "initial_build_periods": "首次建仓期数",
+    "mean_turnover_one_way": "持续调仓平均单边换手率", "p95_turnover_one_way": "单边换手率95%分位",
+    "high_turnover_fraction": "超警戒值期数占比", "turnover_observations": "持续换手有效期数",
+    "turnover_missing_periods": "持续换手缺失期数", "turnover_warning_threshold": "单期单边换手警戒值",
+    "high_turnover": "超过换手警戒值", "industry_code": "行业代码",
+    "industry_name": "行业中文名称", "industry_raw": "原行业字段",
+    "custom_class_code": "AIQ分类序号", "custom_class_name": "AIQ分类名称",
+    "citic_level1_code": "原始中信一级代码", "citic_level1_name": "原始中信一级名称",
+    "industry_mapping_status": "行业映射状态", "mapping_status": "映射状态",
 }
 PERCENT = {
+    "turnover_one_way", "target_turnover_one_way", "mean_turnover_one_way", "p95_turnover_one_way",
+    "high_turnover_fraction", "turnover_warning_threshold",
     "market_cap_coverage",
     "ic_mean", "ic_std", "win_rate", "nw_lower", "nw_upper", "total_return", "annual_return",
     "annual_volatility", "max_drawdown", "annual_turnover", "excess_total_return", "excess_annual_return",
@@ -139,6 +155,10 @@ PERFORMANCE_COLUMNS = ["portfolio", "n_periods", "total_return", "annual_return"
                        "information_ratio", "win_rate", "max_drawdown", "annual_turnover", "excess_total_return",
                        "excess_annual_return", "excess_annual_volatility", "excess_information_ratio",
                        "excess_win_rate", "excess_max_drawdown", "status"]
+EXTRA_PERFORMANCE_COLUMNS = ["sharpe_ratio", "sharpe_n_periods", "excess_sharpe", "excess_sharpe_n_periods",
+                             "mean_turnover_one_way", "p95_turnover_one_way", "high_turnover_fraction",
+                             "turnover_observations", "turnover_missing_periods", "initial_build_periods",
+                             "turnover_warning_threshold"]
 IC_COLUMNS = ["subset", "n", "ic_mean", "ic_std", "annual_icir", "t_stat", "win_rate", "nw_t", "nw_lower", "nw_upper", "nw_status"]
 
 
@@ -455,8 +475,13 @@ def _definitions(config: dict) -> str:
     else:
         preprocessing_steps.append("标准化关闭，中性化残差保留其尺度")
     preprocess_definition = "预处理设置：" + "；".join(preprocessing_steps) + f"。数值秩及常数判断容差为 {tolerance:g}。"
-    if not preprocess.get("winsorize", True) and not preprocess.get("standardize", True):
+    smoothing = config.get("smoothing", {})
+    use_ema = smoothing.get("method", "none") == "ema"
+    aiq_fill = config.get("missing_values", {}).get("method", "preserve") == "aiq_matrix"
+    if not use_ema and not preprocess.get("winsorize", True) and not preprocess.get("standardize", True):
         preprocess_definition += " raw 直接使用输入因子值，signal=value；不改变真实零值、负值或原始尺度。"
+    elif use_ema:
+        preprocess_definition += " raw 表示未中性化平滑信号；value 保留外部原始输入，不能视作原样测试。"
     else:
         preprocess_definition += " raw 表示未中性化版本，仍包含上述已开启的预处理，并非输入值原样通过。"
     sample_definition = (f"本次选择{selected_label}。各版本独立筛选所需输入；raw 只要求有效因子值，不受行业、市值或 Barra 缺失影响。"
@@ -523,6 +548,33 @@ def _definitions(config: dict) -> str:
                      "这是一项显式组合约定。整周无信号或非空组全部缺失收益不属于空组现金，不补零。")
     if "full" in variants:
         items.append("全中性使用的风险暴露：" + "、".join(str(field) for field in risk_fields) + "。")
+    if use_ema:
+        span, minimum = smoothing.get("span", 4), smoothing.get("min_periods", 1)
+        items.append(f"因子平滑已开启：EMA 按每只股票的调仓期序列递推，span={span}、min_periods={minimum}，"
+                     "权重 α=2/(span+1)，只使用当期及此前已知因子。因子缺失或股票池出现断档时重置状态，"
+                     "不以旧平滑值填补缺失；value 保留外部输入，raw 表示未中性化的平滑信号。"
+                     "EMA 可能降低信号变化和换手，也会引入滞后；实际是否降低换手应比较同口径结果，不作保证。")
+    else:
+        items.append("本次框架 EMA 平滑关闭；这只说明框架处理设置，不判断外部已经计算好的因子是否自带平滑。")
+    threshold = metrics.get("turnover_warning_threshold", .5)
+    items.append(f"超额夏普采用算术期均值/期收益样本标准差×√{annualization}，不是几何年化收益/波动率。"
+                 "多头采用 Q10−基准；多空采用 (Q10−基准)−(Q1−基准)=Q10−Q1，基准在双腿抵消，不再扣一次。"
+                 "本项目的多头超额夏普也是相对基准主动收益的信息比率；未加入无风险利率。"
+                 "有限收益不足两期或波动为零时为 NA，并列有效期数；部分缺失时只对有效观测计算矩，不填零。")
+    items.append(f"单边换手=双边换手/2；持续调仓统计排除每腿首次实际建仓，逐期标记、均值、95%分位及超警戒比例仅用有效换手。"
+                 f"本次单期单边警戒值为 {threshold:.2%}，这是可配置诊断而非通用有效性标准。"
+                 "首次建仓和换手缺失的警戒标记为 NA，缺失期单列，不能当成低换手；年化双边换手仍保留原来计入建仓的口径。"
+                 "多空单边换手为两腿双边换手之和/2，名义多空各1单位；没有再除以2单位毛敞口，与单多头资金口径不同。")
+    industry = config.get("industry", {})
+    if industry.get("classification") == "citic_l1":
+        items.append("行业规范采用中信一级中文名称及代码映射，保留行业原字段和映射状态；只向历史匹配当时可用记录，"
+                     "未覆盖的早期日期保持缺失，不把当前分类倒填历史，也不把混合 class 类别猜作某个中信行业。"
+                     "具体来源可用日期范围及映射表见行业分类与覆盖说明。")
+    elif industry.get("classification") == "aiq_zx35":
+        items.append("行业按 AIQ FACFUNC.get_industry → Tools/Toolbox.zxclassified() → get_classname() 的35类规则统一名称，"
+                     "保留原始中信一/二/三级代码和中信一级中文名称。该规则使用中信多级行业及少量股票例外，"
+                     "不等同中信一级30类；类24名称为化学制药但对应全部一级医药，类35为混合类别。"
+                     "只按有效区间及截点匹配，终止和异常事件保留未知；固定规则的历史适用性并未得到独立认证。")
     if include_cap and proxy_cap:
         close_column = cap_config.get("close_column", "close")
         volume_column = cap_config.get("volume_column", "volume")
@@ -537,11 +589,34 @@ def _definitions(config: dict) -> str:
         items.append("市值代理输入及计算结果必须均为有限正数；零、负数、缺失和无穷值保留为缺失，不补零。"
                      "中性化使用 log(market_cap_proxy)，在独立样本模式下，代理缺失只影响需要市值的版本。")
     elif include_cap:
-        items.append("市值来源为 history.float_mcap，要求实际流通市值；缺省 market_cap.method=history。"
+        source, field = cap_config.get("source", "history"), cap_config.get("column", "float_mcap")
+        unit_note = ("AIQ 供应商原始字段为万元，接入层乘10000，单位与股本及行情代理交叉核验。"
+                     if config.get("input_manifest") else "")
+        items.append(f"市值来源为 {source}.{field}，要求实际流通市值，统一以元计；按截点前最近记录匹配，"
+                     "不使用调仓日收盘市值。无效最新记录保留缺失，不回跳旧值；中性化使用其自然对数。"
+                     + unit_note +
                      "Barra SIZE、加工后的 tmv 或规模分档不能冒充实际流通市值；行情代理须显式选择 quote_proxy。")
     if backtest.get("start_date") or backtest.get("end_date"):
         items.append(f"配置的信号入场日期范围：{backtest.get('start_date') or '不限'} 至 {backtest.get('end_date') or '不限'}；实际首末持有期见样本信息。")
     items.append("因子更新频率与调仓频率分别确定；每次调仓取截点前最近一条记录，不对因子做周/月平均。date 必须是实际可用日期，最新记录为空时不越过它寻找旧值。")
+    if aiq_fill:
+        replacements = {
+            "raw 直接使用输入因子值，signal=value；不改变真实零值、负值或原始尺度。":
+                "raw 使用AIQ补缺后的输入，signal=value；value_original保留原始值，不能称为外部数值原样通过。",
+            "value 保留外部原始输入": "value保留AIQ补缺后的输入，value_original另存外部原值",
+            "无效最新记录保留缺失，不回跳旧值": "仅NaN按AIQ前填，原始0、负值及无穷不会被跳过；有限正值检查在补缺之后",
+            "最新记录无效时不越过它回取更旧有效值。": "补缺前原值与真实供值日另存；NaN按源字段规则填充，0/负值/无穷仍按有效性规则处理。",
+            "最新记录为空时不越过它寻找旧值。": "最新NaN按AIQ规则处理，并披露原始缺失与供值日；不向未来回填。",
+        }
+        for old, new in replacements.items():
+            items = [item.replace(old, new) for item in items]
+        items[15] = ("价格字段按AIQ矩阵规则补缺：acc_open沿用自身此前的复权开盘，不改用前收盘；"
+                     "原始开盘open仍保留缺失。端点原值、填充标记及供值日保留；上市前供值和退市后无观察价不冒充有效成交或结算。")
+        items.append("缺失策略 aiq_matrix：volume/amount/return/vwap首个非空观测后缺失补0；open/high/low/turnover等保持缺失；"
+                     "acc_open/acc_close、市值和普通因子字段前填；指定日内vwap/twap使用last。只处理NaN，原始0/负/无穷不被当NaN跳过。"
+                     "日return的补零规则不会直接套到缺失周/月组合收益。")
+        items.append("行业按AIQ分类矩阵前填，包括源空事件；industry_original和原状态保留，填后覆盖不表示原始行业档案完整。"
+                     "ST是执行/取消事件，不对coverage_expiry未知通用前填。未叠加getfactor的行业/总市值回归补缺；EMA和截面预处理在字段补缺之后。")
     if monthly:
         items.append("本次按月调仓：完整交易日历中每月首个交易日开盘进入，持有至下月首个交易日开盘；月中开始的区间不会伪造月初调仓日。")
         items.append("periods.parquet、ic_periodic.csv、portfolio_periodic.csv 以持有期为单位；兼容文件 weeks.parquet 及 *_weekly.csv 在本次也存月度记录，文件名不改变收益频率。")
@@ -554,6 +629,8 @@ def _definitions(config: dict) -> str:
                    '本项目采用分组后有效收益统计，保留原始分组和缺失披露；空组现金是本项目配置约定。'
                    '<a href="https://github.com/microsoft/qlib/blob/main/qlib/backtest/account.py">Qlib 持仓估值</a>'
                    '在停牌时保留已有价格，这与统计均值计算属于不同层次；本报告不是持续现金账户的可实现全收益。</p>')
+    sources += ('<p class="caption">夏普计算参考：<a href="https://github.com/quantopian/empyrical/blob/master/empyrical/stats.py">'
+                'Empyrical sharpe_ratio</a> 的算术均值、样本标准差与频率年化公式；常数序列在本项目明确报告为 NA。</p>')
     return _contextualize(_details("指标定义与回测口径", "<ol>" + "".join(f"<li>{_escape(item)}</li>" for item in items) + "</ol>" + sources, True), config)
 
 
@@ -867,6 +944,114 @@ def _factor_path(root: Path, factor: dict) -> Path | None:
     return expected if declared == expected and expected.parent == (root / "factors").resolve() else None
 
 
+def _industry_disclosure(root: Path, config: dict, audit: dict, *, prefix: str = "") -> str:
+    industry = config.get("industry", {})
+    if industry.get("classification") not in {"citic_l1", "aiq_zx35"}:
+        return ""
+    source = industry.get("source", "industry")
+    observed = audit.get("sources", {}).get(source, {})
+    first, last = _date(observed.get("start")), _date(observed.get("end"))
+    if first and last:
+        dates = f"可用日期范围为 {first} 至 {last}"
+    elif not set(_variant_labels(config)) & {"industry", "industry_size", "full"}:
+        dates = "本次无需行业控制，因此未加载；来源声明不构成原始或纯市值版本的数据门槛"
+    else:
+        dates = "本次未取得可核验的可用日期覆盖范围"
+    aiq = industry.get("classification") == "aiq_zx35"
+    description = ("采用 FACFUNC.get_industry → zxclassified() → get_classname() 的35类行业及名称，"
+                   "同时保留原始中信一级信息。35类派生分类与标准一级30类分别记录。" if aiq else "采用中信一级行业中文名称和代码。")
+    body = _notice("行业分类与覆盖", f"{description}来源 {source} {dates}；"
+                   "这是来源范围，不表示区间内每只股票均有行业。更早日期和未映射记录保持缺失，不向历史倒填；"
+                   "独立样本下仅影响需要行业的版本，原始版本及纯市值版本不因此缩减。", "info")
+    if config.get("missing_values", {}).get("method") == "aiq_matrix":
+        body = _notice("行业分类与覆盖", f"{description}来源 {source} {dates}；AIQ矩阵模式对类别缺失前填，"
+                       "保留原始缺失、事件状态和真实供值日。填后可用率不代表原始区间完整；首个有效分类前不回填，"
+                       "控制缺失仍只影响需要行业的版本。", "info")
+    mapping = _csv(root / "industry_mapping.csv")
+    if not mapping.empty:
+        body += _details("AIQ 35类行业—中文名称映射" if aiq else "中信一级行业—中文字段映射", render_table(mapping, 100)
+                         + f'<p><a href="{_escape(prefix + "industry_mapping.csv")}">下载完整行业映射表</a></p>')
+    return body
+
+
+def _data_usage_disclosure(root: Path, *, prefix: str = "") -> str:
+    usage = _csv(root / "data_usage.csv")
+    if usage.empty:
+        return ""
+    body = "<h2>本次数据来源与缺失披露</h2>" + render_table(usage, 100)
+    quality = _csv(root / "data_quality_summary.csv")
+    if not quality.empty:
+        if "比例" in quality:
+            quality["比例"] = quality["比例"].map(lambda value: f"{value:.6%}" if pd.notna(value) else "NA")
+        body += render_table(quality, 100)
+    industries = _csv(root / "industry_distribution.csv")
+    if not industries.empty:
+        body += _details("行业与原始中信一级对应及覆盖", render_table(industries, 150))
+    provenance = load_json(root / "audit.json").get("input_provenance", {})
+    if provenance:
+        from .data import write_json
+        write_json(root / "input_provenance.json", provenance)
+        datasets = provenance.get("manifest", {}).get("datasets", {})
+        cap = datasets.get("market_cap", {})
+        stage = []
+        stats = cap.get("input_stats", {}).get("market_feature", {})
+        if stats:
+            stage.append({"接入阶段核验": "非交易日市值排除", "记录数": stats.get("non_trading_date", 0)})
+            stage.append({"接入阶段核验": "无效市值保留缺失事件", "记录数": cap.get("statuses", {}).get("nonfinite_or_nonpositive", 0)})
+            stage.append({"接入阶段核验": "市值常规核验分歧（保留正值）", "记录数": cap.get("crosschecks", {}).get("diagnostic_disagreement", 0)})
+        if datasets.get("st_combined"):
+            stage.append({"接入阶段核验": "ST来源分歧边界（官方优先）", "记录数": datasets["st_combined"].get("conflicting_boundary_rows", 0)})
+        status = datasets.get("status", {})
+        if "suspension_events_with_nonzero_volume_close" in status:
+            stage.append({"接入阶段核验": "停牌事件日有非零量价（仅核查）", "记录数": status["suspension_events_with_nonzero_volume_close"]})
+        if "volume_filled_rows" in status.get("counts", {}):
+            stage.append({"接入阶段核验": "AIQ日网格成交量缺失补0（代理假设）", "记录数": status["counts"]["volume_filled_rows"]})
+        if stage:
+            body += _details("原始数据适配与异常记录", render_table(pd.DataFrame(stage), 100))
+        body += f'<p><a href="{_escape(prefix + "input_provenance.json")}">下载本轮输入来源、日期规则及适配审计清单</a></p>'
+    return body
+
+
+def _sharpe_summary(performance: pd.DataFrame, config: dict) -> str:
+    if "excess_sharpe" not in performance:
+        return ""
+    selected = performance[performance.portfolio.isin(["Q10", "Q10-Q1"])].copy()
+    selected["variant"] = selected.variant.map(_variant_labels(config)).fillna(selected.variant)
+    selected["portfolio"] = selected.portfolio.map({"Q10": "多头（Q10−基准）", "Q10-Q1": "多空（Q10−Q1）"})
+    return ("<h2>多头与多空超额夏普</h2>" + render_table(selected, columns=["variant", "portfolio",
+            "excess_sharpe", "excess_sharpe_n_periods", "status"])
+            + '<p class="caption">按算术收益均值及样本标准差计算；多空的两腿基准相互抵消。'
+              'Q10 固定为高因子组，不根据回测表现翻转方向；缺失观测数量见有效期数及状态。</p>')
+
+
+def _turnover_section(portfolio: pd.DataFrame, performance: pd.DataFrame, charts: _Charts, config: dict) -> str:
+    if "turnover_one_way" not in portfolio:
+        return ""
+    drift_series, target_series = [], []
+    for name in ("Q1", "Q10", "Q10-Q1"):
+        group = portfolio[portfolio.portfolio.eq(name)].sort_values("entry")
+        drift_series.append({"name": name, "points": _points(group, "turnover_one_way", "entry")})
+        target_series.append({"name": name, "points": _points(group, "target_turnover_one_way", "entry")})
+    threshold = config.get("metrics", {}).get("turnover_warning_threshold", .5)
+    dates = portfolio[["entry"]].drop_duplicates().sort_values("entry").assign(threshold=threshold)
+    drift_series.append({"name": "配置警戒值", "points": _points(dates, "threshold", "entry")})
+    body = "<h3>换手率与高换手诊断</h3>"
+    body += ('<div class="grid-two">'
+             + charts.chart("逐期单边漂移换手率", drift_series, unit="percent",
+                 caption="目标权重与收益漂移后旧权重之差，双边之和除以2。缺失保持断点；图上展示建仓，警戒汇总排除首次建仓。")
+             + charts.chart("逐期目标单边换手率", target_series, unit="percent",
+                 caption="相邻冻结目标权重变化，不含收益漂移，不替代未知漂移换手。多空为两腿合计口径。") + "</div>")
+    columns = ["portfolio", "mean_turnover_one_way", "p95_turnover_one_way", "high_turnover_fraction",
+               "turnover_observations", "turnover_missing_periods", "initial_build_periods", "turnover_warning_threshold"]
+    body += render_table(performance, columns=columns)
+    body += f'<p class="caption">警戒值 {_escape(f"{threshold:.2%}")} 为单个调仓期单边换手的可配置诊断，不是通用有效性标准。'
+    body += ("持续调仓均值、分位数和超警戒比例排除首次实际建仓，仅对已知换手计算；缺失不当作0或低换手。"
+             "多空名义多、空各1单位，其单边换手为两腿双边换手之和/2，没有再按2单位毛敞口归一。</p>")
+    body += _details("逐期换手与建仓标记", render_table(portfolio, 60,
+        ["entry", "portfolio", "turnover_one_way", "target_turnover_one_way", "initial_build", "high_turnover"]))
+    return body
+
+
 def _factor_report(root: Path, folder: Path, factor: dict, config: dict, audit: dict, coverage: pd.DataFrame, usable: bool, issues: list[str]) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     name, label = str(factor.get("name", folder.name)), str(factor.get("label", factor.get("name", folder.name)))
@@ -897,6 +1082,9 @@ def _factor_report(root: Path, folder: Path, factor: dict, config: dict, audit: 
     sections.append("<h2>测试信息</h2>" + _sample_records(factor.get("sample", {}), config))
     if factor.get("summary"):
         sections.append(_records(factor["summary"]))
+    sections.append(_sharpe_summary(frames["performance"], config))
+    sections.append(_industry_disclosure(root, config, audit, prefix="../../"))
+    sections.append(_data_usage_disclosure(root, prefix="../../"))
     sections.append(_definitions(config))
     sections.append("<h2>1. 覆盖度</h2>")
     local = coverage[coverage.factor.astype(str) == name].sort_values("entry") if "factor" in coverage else pd.DataFrame()
@@ -955,7 +1143,9 @@ def _factor_report(root: Path, folder: Path, factor: dict, config: dict, audit: 
         performance_columns = PERFORMANCE_COLUMNS.copy()
         if "annual_target_turnover" in performance:
             performance_columns.insert(performance_columns.index("annual_turnover") + 1, "annual_target_turnover")
+        performance_columns.extend(column for column in EXTRA_PERFORMANCE_COLUMNS if column in performance)
         sections.append(render_table(performance, columns=performance_columns))
+        sections.append(_turnover_section(portfolio, performance, charts, config))
         sections.append(_details("分组股票数量、空组与交易受限诊断", render_table(_portfolio_diagnostics(portfolio), 20)
                                  + '<p class="caption">交易受限比例为当周组内股票数占比的周度均值及单周最高值；这不是实际未成交率。Q10−Q1 股票数为两腿股票数之和。共同样本 ALL 篮子未混入十分组表。</p>', True))
         if "missing_weight" in portfolio:
@@ -1069,6 +1259,8 @@ def report(run_dir: str | Path) -> Path:
         sections.append(charts.chart("逐因子覆盖率", coverage_series, unit="percent", caption="覆盖数据来自当前审计与面板；缺失收益不会用于重排股票或改变当期排名。"))
         sections.append(_details("逐周覆盖明细", render_table(coverage, 40)))
     sections.append(_definitions(config))
+    sections.append(_industry_disclosure(root, config, audit))
+    sections.append(_data_usage_disclosure(root))
     sections = [_contextualize(section, config) for section in sections]
     sections.append(_source_audit(audit))
     for filename, title in [("preprocessing_failures", "预处理与分组失败记录"), ("field_mapping", "因子分类表映射与来源修正")]:

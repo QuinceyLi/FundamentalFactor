@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .smoothing import smoothing_settings
+
 
 class DataGateError(RuntimeError):
     """Inputs are not sufficient for publishing a formal backtest."""
@@ -85,7 +87,8 @@ class Config:
     @property
     def market_cap(self) -> dict:
         # Resolve defaults here, preserving frozen configurations and their digests.
-        return {"method": "history", "quotes_source": "market_cap_quotes", "turnover_source": "quotes",
+        return {"method": "history", "source": "history", "column": "float_mcap",
+                "quotes_source": "market_cap_quotes", "turnover_source": "quotes",
                 "close_column": "close", "volume_column": "volume", "turnover_column": "turnover",
                 "volume_unit": "lot", "turnover_unit": "percent", "price_basis": "unadjusted"} | (
                     self.raw.get("neutralization", {}).get("market_cap", {}))
@@ -97,6 +100,36 @@ class Config:
     @property
     def uses_market_cap_proxy(self) -> bool:
         return self.requires_market_cap and self.market_cap["method"] == "quote_proxy"
+
+    @property
+    def separate_market_cap_source(self) -> bool:
+        # A custom column in the same file also needs the explicit projection
+        # and rename path; never silently use an unrelated float_mcap column.
+        return self.requires_float_mcap and (self.market_cap["source"] != "history"
+                                             or self.market_cap["column"] != "float_mcap")
+
+    @property
+    def smoothing(self) -> dict:
+        return smoothing_settings(self.raw.get("smoothing"))
+
+    @property
+    def missing_values(self) -> dict:
+        # Omitted policies retain frozen historical results. All current
+        # recommended presets select aiq_matrix explicitly.
+        return {"method": "preserve"} | self.raw.get("missing_values", {})
+
+    @property
+    def aiq_fill_enabled(self) -> bool:
+        return self.missing_values["method"] == "aiq_matrix"
+
+    @property
+    def industry(self) -> dict:
+        # Existing frozen runs retain their original vendor categories.
+        return {"classification": "legacy", "source": "history", "column": "industry"} | self.raw.get("industry", {})
+
+    @property
+    def separate_industry_source(self) -> bool:
+        return self.requires_industry and self.industry["source"] != "history"
 
     @property
     def data_policy(self) -> dict:
@@ -150,7 +183,8 @@ def load_config(path: str | Path) -> Config:
     if frequency not in ("weekly", "monthly"):
         raise ValueError("backtest.rebalance_frequency 必须为 weekly 或 monthly")
     metric_defaults = DEFAULT_METRICS if frequency == "weekly" else {"annualization": 12, "nw_lag": 3}
-    extra_options = {"backtest": {"rebalance_frequency"}, "preprocess": {"winsorize", "standardize"}}
+    extra_options = {"backtest": {"rebalance_frequency"}, "preprocess": {"winsorize", "standardize"},
+                     "metrics": {"turnover_warning_threshold"}}
     for key, defaults in (("backtest", DEFAULT_BACKTEST), ("preprocess", DEFAULT_PREPROCESS),
                           ("metrics", metric_defaults)):
         supplied = raw.get(key, {})
@@ -166,6 +200,32 @@ def load_config(path: str | Path) -> Config:
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"{key} must be a positive integer")
     pre = raw["preprocess"]
+    threshold = raw["metrics"].get("turnover_warning_threshold", .5)
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 < threshold < float("inf"):
+        raise ValueError("metrics.turnover_warning_threshold 必须是有限正数（每次调仓单边比例）")
+    if "smoothing" in raw:
+        smoothing_settings(raw["smoothing"])
+    if "missing_values" in raw:
+        missing = raw["missing_values"]
+        if (not isinstance(missing, dict) or set(missing) != {"method"}
+                or missing["method"] not in {"preserve", "aiq_matrix"}):
+            raise ValueError("missing_values.method 必须为 preserve 或 aiq_matrix")
+    if "industry" in raw:
+        industry = raw["industry"]
+        if not isinstance(industry, dict) or set(industry) - {"classification", "source", "column"}:
+            raise ValueError("industry 仅支持 classification、source、column")
+        if industry.get("classification", "legacy") not in {"legacy", "citic_l1", "aiq_zx35"}:
+            raise ValueError("industry.classification 必须为 legacy、citic_l1 或 aiq_zx35")
+        for key, default in (("source", "history"), ("column", "industry")):
+            value = industry.get(key, default)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"industry.{key} 必须为非空名称")
+        if industry.get("source", "history") not in raw["sources"]:
+            raise ValueError("industry.source 必须在 sources 中定义；缺失数据可显式设为 null")
+        if industry.get("source", "history") in {"stocks", "calendar", "terminal", "corporate_actions", "execution_terminal"}:
+            raise ValueError("industry.source 必须是 date/code 历史分类，不能复用证券主表、日历或结算入口")
+        if industry.get("column", "industry") in {"date", "code", "is_st", "float_mcap"}:
+            raise ValueError("industry.column 必须为行业分类字段")
     for flag in ("winsorize", "standardize"):
         if flag in pre and not isinstance(pre[flag], bool):
             raise ValueError(f"preprocess.{flag} must be boolean")
@@ -210,12 +270,24 @@ def load_config(path: str | Path) -> Config:
                 raise ValueError("neutralization.variants 必须为非空、无重复的有效版本列表")
         if "market_cap" in settings:
             cap = settings["market_cap"]
-            allowed = {"method", "quotes_source", "turnover_source", "close_column", "volume_column",
+            allowed = {"method", "source", "column", "quotes_source", "turnover_source", "close_column", "volume_column",
                        "turnover_column", "volume_unit", "turnover_unit", "price_basis"}
             if not isinstance(cap, dict) or set(cap) - allowed:
                 raise ValueError("neutralization.market_cap 包含未知参数")
             if cap.get("method", "history") not in {"history", "quote_proxy"}:
                 raise ValueError("neutralization.market_cap.method 必须为 history 或 quote_proxy")
+            for key, default in (("source", "history"), ("column", "float_mcap")):
+                value = cap.get(key, default)
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"neutralization.market_cap.{key} 必须为非空字段或来源名称")
+            if cap.get("method", "history") == "history":
+                source = cap.get("source", "history")
+                if source not in raw["sources"]:
+                    raise ValueError("历史流通市值来源必须在 sources 中定义")
+                if source in {"stocks", "calendar", "terminal", "corporate_actions", "execution_terminal"}:
+                    raise ValueError("历史流通市值必须是 date/code 历史表")
+                if cap.get("column", "float_mcap") in {"date", "code", "is_st", "industry"}:
+                    raise ValueError("历史流通市值字段不可复用键或状态字段")
             for key, expected in (("volume_unit", "lot"), ("turnover_unit", "percent"),
                                   ("price_basis", "unadjusted")):
                 if cap.get(key, expected) != expected:
@@ -265,6 +337,8 @@ def load_config(path: str | Path) -> Config:
             raise ValueError("复权单位执行账本必须声明 data_policy.mode=proxy 或 classic")
     if raw.get("classification_workbook"):
         raw["classification_workbook"] = str((base / raw["classification_workbook"]).resolve())
+    if raw.get("input_manifest"):
+        raw["input_manifest"] = str((base / raw["input_manifest"]).resolve())
     config = Config(raw, path)
     for source in raw["sources"].values():
         if source and (config.output == Path(source) or config.output in Path(source).parents):

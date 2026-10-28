@@ -75,6 +75,17 @@ def drift_turnover(target: Mapping[str, float],
     return float(turnover), drifted
 
 
+def _sharpe_stats(returns, annualization: int) -> tuple[float, int]:
+    """Arithmetic mean / sample standard deviation, on finite observations."""
+    values = np.asarray(returns, dtype=float)
+    valid = values[np.isfinite(values)]
+    n = len(valid)
+    sd = float(valid.std(ddof=1)) if n > 1 else np.nan
+    value = (float(valid.mean() / sd * np.sqrt(annualization))
+             if n > 1 and np.ptp(valid) > 0 and np.isfinite(sd) and sd > 0 else np.nan)
+    return value, n
+
+
 def _return_metrics(returns, annualization: int) -> dict:
     series = np.asarray(returns, dtype=float)
     if series.ndim != 1:
@@ -91,8 +102,10 @@ def _return_metrics(returns, annualization: int) -> dict:
     bankrupt = failure is not None and series[failure] == -1
     insolvent = failure is not None and series[failure] < -1
     volatility = float(np.std(valid, ddof=1) * np.sqrt(annualization)) if n > 1 else np.nan
+    sharpe, _ = _sharpe_stats(valid, annualization)
     result = {"n_periods": n, "total_return": np.nan, "annual_return": np.nan,
               "annual_volatility": volatility, "information_ratio": np.nan,
+              "sharpe_ratio": sharpe, "sharpe_n_periods": n,
               "win_rate": float(np.mean(valid > 0)) if n else np.nan,
               "max_drawdown": np.nan,
               "status": ("insolvency" if insolvent else "bankruptcy" if bankrupt else
@@ -119,8 +132,44 @@ def _return_metrics(returns, annualization: int) -> dict:
     return result
 
 
+def _turnover_diagnostics(turnover, shape, initial_build, threshold) -> dict:
+    """Observe continuing rebalances, excluding first funding of each leg.
+
+    One-way turnover is half the existing double-sided position change. For
+    Q10-Q1 the two unit-notional legs are summed before dividing by two; this
+    is not turnover divided by the spread's two-unit gross exposure.
+    """
+    if (isinstance(threshold, bool) or not isinstance(threshold, (int, float))
+            or not np.isfinite(threshold) or threshold < 0):
+        raise ValueError("turnover_warning_threshold must be finite and nonnegative")
+    initial = np.zeros(shape, dtype=bool) if initial_build is None else np.asarray(initial_build, dtype=bool)
+    if initial.shape != shape:
+        raise ValueError("Returns and initial-build flags must share the same period grid")
+    result = {"mean_turnover_one_way": np.nan, "p95_turnover_one_way": np.nan,
+              "high_turnover_fraction": np.nan, "turnover_observations": 0,
+              "turnover_missing_periods": 0, "initial_build_periods": int(initial.sum()),
+              "turnover_warning_threshold": float(threshold)}
+    if turnover is None:
+        return result
+    traded = np.asarray(turnover, dtype=float)
+    if traded.shape != shape:
+        raise ValueError("Returns and turnover must share the same period grid")
+    if (traded[np.isfinite(traded)] < 0).any():
+        raise ValueError("Turnover must be nonnegative when observed")
+    continuing = traded[~initial] / 2.
+    good = continuing[np.isfinite(continuing)]
+    result.update(turnover_observations=len(good),
+                  turnover_missing_periods=int((~np.isfinite(continuing)).sum()))
+    if len(good):
+        result.update(mean_turnover_one_way=float(good.mean()),
+                      p95_turnover_one_way=float(np.quantile(good, .95)),
+                      high_turnover_fraction=float(np.mean(good > threshold)))
+    return result
+
+
 def performance_metrics(returns, turnover=None, excess_returns=None,
-                        annualization: int = 52, target_turnover=None) -> dict:
+                        annualization: int = 52, target_turnover=None,
+                        initial_build=None, turnover_warning_threshold: float = .5) -> dict:
     """Attachment-compatible CAGR/volatility statistics on a full weekly grid.
 
     Gaps are never compressed for cumulative results.  Valid-period volatility
@@ -131,6 +180,8 @@ def performance_metrics(returns, turnover=None, excess_returns=None,
         raise ValueError("annualization must be positive")
     values = np.asarray(returns, dtype=float)
     result = _return_metrics(values, annualization)
+    result.update(_turnover_diagnostics(turnover, values.shape, initial_build,
+                                       turnover_warning_threshold))
     result["annual_turnover"] = np.nan
     result["annual_target_turnover"] = np.nan
     if turnover is not None:
@@ -154,6 +205,16 @@ def performance_metrics(returns, turnover=None, excess_returns=None,
     for key in ("total_return", "annual_return", "annual_volatility", "information_ratio",
                 "win_rate", "max_drawdown"):
         result[f"excess_{key}"] = excess[key]
+    result["excess_sharpe"] = np.nan
+    result["excess_sharpe_n_periods"] = 0
+    if excess_returns is not None:
+        # A benchmark-relative return can be below -100% without destroying
+        # the actual long portfolio. Do not apply the legacy excess NAV's
+        # bankruptcy truncation to the new arithmetic Sharpe observations.
+        failures = np.flatnonzero(np.isfinite(values) & (values <= -1))
+        stop = int(failures[0]) + 1 if len(failures) else len(values)
+        result["excess_sharpe"], result["excess_sharpe_n_periods"] = _sharpe_stats(
+            np.asarray(excess_returns, dtype=float)[:stop], annualization)
     if excess_returns is not None and excess["status"] in {"bankruptcy", "insolvency"}:
         result["status"] += f";excess_{excess['status']}"
     return result
@@ -283,10 +344,12 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
                     weeks: pd.DataFrame, annualization: int = 52,
                     nw_lag: int = 13, missing_returns: str = "error",
                     empty_groups: str = "missing", sample_policy: str = "common",
-                    variants: list[str] | None = None) -> dict[str, pd.DataFrame]:
+                    variants: list[str] | None = None,
+                    turnover_warning_threshold: float = .5) -> dict[str, pd.DataFrame]:
     """Evaluate frozen signals over supplied weekly or monthly holding intervals."""
     if empty_groups not in ("missing", "cash"):
         raise ValueError("empty_groups must be missing or cash")
+    _turnover_diagnostics(None, (0,), None, turnover_warning_threshold)
     joined, labels, benchmark, weeks = _prepare_inputs(signals, labels, benchmark, weeks, missing_returns, sample_policy)
     available_case = missing_returns == "available_case"
     observed_variants = set(joined.variant.unique())
@@ -302,6 +365,7 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
     previous_targets: dict[tuple[str, str], dict | None] = {}
     unknown_previous: set[tuple[str, str]] = set()
     dead_portfolios: dict[tuple[str, str], str] = {}
+    funded_portfolios: set[tuple[str, str]] = set()
 
     for week in weeks.itertuples(index=False):
         base_return = float(benchmark_map[week.entry])
@@ -333,6 +397,9 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
                     previous.pop(key, None)
                 dead = key in dead_portfolios
                 target = dict.fromkeys(group.code, 1.0 / n) if n and not dead else {}
+                initial_build = bool(n and not dead and key not in funded_portfolios)
+                if initial_build:
+                    funded_portfolios.add(key)
                 turnover, drifted = np.nan, {}
                 reason = f"portfolio_{dead_portfolios[key]}" if dead else "" if n else "empty_group"
                 if not dead and drift_known and (signal_known or not available_case):
@@ -380,6 +447,7 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
                        "benchmark_return": base_return,
                        "excess_return": stock_return - base_return if complete else np.nan,
                        "turnover": turnover, "trade_restricted_fraction": restriction,
+                       "initial_build": initial_build,
                        "target_turnover": target_turnover,
                        "trade_restriction_unknown_fraction": float(group.trade_restriction_unknown.mean()) if n else np.nan,
                        "turnover_complete": bool(drift_known and (n or empty_cash) and not dead),
@@ -439,6 +507,7 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
                 "return": spread_return,
                 "benchmark_return": base_return, "excess_return": np.nan,
                 "turnover": high["turnover"] + low["turnover"] if complete or available_case else np.nan,
+                "initial_build": bool(high["initial_build"] or low["initial_build"]),
                 "target_turnover": high["target_turnover"] + low["target_turnover"],
                 "trade_restricted_fraction": leg_diagnostic("trade_restricted_fraction") if complete else np.nan,
                 "trade_restriction_unknown_fraction": leg_diagnostic("trade_restriction_unknown_fraction") if complete else np.nan,
@@ -481,6 +550,13 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
             "nw_lower": nw.get("lower"), "nw_upper": nw.get("upper"), "nw_status": nw["status"]})
 
     portfolio_weekly = pd.DataFrame(portfolio_rows).sort_values(["variant", "portfolio", "entry"])
+    portfolio_weekly["turnover_one_way"] = portfolio_weekly.turnover / 2.
+    portfolio_weekly["target_turnover_one_way"] = portfolio_weekly.target_turnover / 2.
+    continuing = ~portfolio_weekly.initial_build & np.isfinite(portfolio_weekly.turnover_one_way)
+    portfolio_weekly["high_turnover"] = pd.Series(pd.NA, index=portfolio_weekly.index, dtype="boolean")
+    portfolio_weekly.loc[continuing, "high_turnover"] = (
+        portfolio_weekly.loc[continuing, "turnover_one_way"] > turnover_warning_threshold)
+    portfolio_weekly["turnover_warning_threshold"] = turnover_warning_threshold
     performance_rows, annual_rows = [], []
     for (variant, portfolio), block in portfolio_weekly.groupby(["variant", "portfolio"], sort=False):
         nav, segments = _segmented_path(block["return"])
@@ -489,15 +565,24 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
         portfolio_weekly.loc[block.index, "excess_nav"] = excess_nav
         portfolio_weekly.loc[block.index, "segment_id"] = [np.nan if v is None else v for v in segments]
         portfolio_weekly.loc[block.index, "excess_segment_id"] = [np.nan if v is None else v for v in excess_segments]
-        kwargs = {"annualization": annualization}
+        kwargs = {"annualization": annualization, "turnover_warning_threshold": turnover_warning_threshold}
         excess = None if portfolio == "Q10-Q1" else block.excess_return
         metrics = performance_metrics(block["return"], block.turnover, excess,
-                                      target_turnover=block.target_turnover, **kwargs)
+                                      target_turnover=block.target_turnover, initial_build=block.initial_build, **kwargs)
+        if portfolio == "Q10-Q1":
+            # (high - benchmark) - (low - benchmark) = high - low.
+            # Keep legacy excess CAGR/nav absent for a self-financing spread.
+            metrics["excess_sharpe"] = metrics["sharpe_ratio"]
+            metrics["excess_sharpe_n_periods"] = metrics["sharpe_n_periods"]
         performance_rows.append({"variant": variant, "portfolio": portfolio, **metrics})
         for year, annual in block.groupby(block.entry.dt.year, sort=True):
             annual_excess = None if portfolio == "Q10-Q1" else annual.excess_return
             metrics = performance_metrics(annual["return"], annual.turnover, annual_excess,
-                                          target_turnover=annual.target_turnover, **kwargs)
+                                          target_turnover=annual.target_turnover,
+                                          initial_build=annual.initial_build, **kwargs)
+            if portfolio == "Q10-Q1":
+                metrics["excess_sharpe"] = metrics["sharpe_ratio"]
+                metrics["excess_sharpe_n_periods"] = metrics["sharpe_n_periods"]
             annual_rows.append({"variant": variant, "portfolio": portfolio, "year": int(year), **metrics})
 
     holdings = (pd.concat(holding_chunks, ignore_index=True) if holding_chunks else

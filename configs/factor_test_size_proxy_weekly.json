@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "data_root": "/data/mongo",
-  "output_dir": "../outputs/factor_test_size_proxy_weekly",
+  "output_dir": "../outputs/factor_test_size_proxy_weekly_aiq_matrix_20261028",
   "dataset_kind": "observed",
   "classification_workbook": "/home/liqinghua/.codex/attachments/413d870c-c9f9-4abc-936a-cbe2822ef3a4/因子分类.xlsx",
   "factors": [
@@ -26,13 +26,14 @@
     "stocks": "public_stock_master_sh_sz.feather",
     "history": "stock_history_proxy.feather",
     "calendar": "public_trade_calendar_sina.feather",
-    "status": "stock_trade_status_proxy.feather",
+    "status": "/home/liqinghua/FundamentalFactor/outputs/aiq_matrix_inputs_20261028/trade_status.parquet",
     "terminal": null,
     "execution_quotes": null,
     "execution_status": null,
     "corporate_actions": null,
     "execution_terminal": null,
-    "market_cap_quotes": "/home/liqinghua/FundamentalFactor/outputs/gfoptim_inputs/raw_quotes.parquet"
+    "market_cap_quotes": "/home/liqinghua/FundamentalFactor/outputs/gfoptim_inputs/raw_quotes.parquet",
+    "industry": "/home/liqinghua/FundamentalFactor/outputs/citic_industry_20261027/stock_industry_citic_l1.parquet"
   },
   "point_in_time_confirmed": true,
   "point_in_time_evidence": "用户确认明细文件 date 表示当时已公开可用的快照；审计核对历史快照时序，不额外统一施加财报披露滞后。",
@@ -41,10 +42,10 @@
     "total_return": false,
     "suspended_total_return": false,
     "return_kind": "adjusted_price",
-    "suspension_valuation": "previous_adjusted_close",
+    "suspension_valuation": "aiq_field_rules",
     "open_column": "acc_open",
     "close_column": "acc_close",
-    "description": "使用独立修复版本 quotefac_repaired：原始报价多源核对，修复000001.SZ 2025-05-28复权倍率断点，保留其余未证伪事件。收益为复权开盘价格比，未宣称涵盖全部公司行动的经济全收益。退出停牌沿用最近复权收盘估值。"
+    "description": "保留quotefac_repaired已修复复权收益主源。AIQ矩阵缺失规则按字段实施：acc_open沿用自身历史开盘，raw open保留空值；仅处理NaN，不把0/负/无穷变成可跳过缺失。保留原值、填充与真实供值日，不将上市前供值或退市后无观察价格当有效成交/清算。收益仍为复权价格变化，未认证全公司行动现金全收益。"
   },
   "backtest": {
     "min_listing_sessions": 120,
@@ -65,7 +66,8 @@
   },
   "metrics": {
     "annualization": 52,
-    "nw_lag": 13
+    "nw_lag": 13,
+    "turnover_warning_threshold": 0.5
   },
   "execution": {
     "enabled": false,
@@ -101,7 +103,19 @@
     "st_unknown": "include",
     "suspension_unknown": "include",
     "missing_returns": "available_case",
-    "description": "ST 采用深交所官方简称变更历史，首次事件前及未覆盖上海代码保持未知并纳入研究；停牌采用 GF 的 volume==0 或 close==0，当日全日数据仅作研究过滤。涨跌停用历史板块比例、已知 ST 及除权参考价估计，仅作限制诊断。行业沿用 on_all_temp 历史 class 原始类别；未将今日行业倒填历史，class35 为混合类别。 经典因子统计口径：ST或停牌状态未知不阻断计算、不宣称可成交；有有效价格即保留收益，无法确定的收益保留缺失。 组合和基准采用Qlib式有效收益样本均值；冻结目标权重与收益统计权重分别记录。并列形成的空组按零利息现金处理；全部信号缺失或非空组全缺收益不补零。",
+    "description": "本次missing_values.method=aiq_matrix，统一AIQ字段矩阵的zero/keep/ffill/last；因子、行业和市值前填均保留原值及供值日期，0/负/无穷不被旧有效值覆盖。ST按事件含取消及来源到期未知独立处理。停牌代理由补缺后的原始成交量/收盘推导，开盘限制仍是代理。信号截点和股票生命周期独立约束；不把未知退市现金或缺失周/月收益普遍补0。组内部分标签按available_case统计，原始缺失与填充覆盖分别披露。",
     "empty_groups": "cash"
-  }
+  },
+  "industry": {
+    "classification": "citic_l1",
+    "source": "industry",
+    "column": "industry_raw"
+  },
+  "smoothing": {
+    "method": "none"
+  },
+  "missing_values": {
+    "method": "aiq_matrix"
+  },
+  "input_manifest": "/home/liqinghua/FundamentalFactor/outputs/aiq_matrix_inputs_20261028/manifest.json"
 }

@@ -9,7 +9,9 @@ from .audit import audit, source_columns
 from .config import Config, DataGateError, RISK_FIELDS
 from .data import asof_snapshot, columns, fingerprint, read_frame, write_json
 from .preprocess import prepare_signals
-from .market_cap import PROXY_COLUMNS, market_cap_snapshot
+from .market_cap import (HISTORY_COLUMNS, PROXY_COLUMNS, historical_market_cap_snapshot,
+                         market_cap_snapshot)
+from .smoothing import SMOOTHING_COLUMNS, smooth_factor
 
 
 def _status_frame(config: Config) -> pd.DataFrame:
@@ -62,6 +64,12 @@ def weekly_calendar(calendar: pd.Series, start: pd.Timestamp, end: pd.Timestamp,
 def _panel_calculation_version(config: Config) -> int:
     # Keep existing weekly/common/preprocessed caches reproducible. A new
     # sampling, transformation or frequency contract cannot reuse version 3.
+    if config.aiq_fill_enabled:
+        return 8
+    if config.separate_market_cap_source or config.industry["classification"] == "aiq_zx35":
+        return 7
+    if config.smoothing["method"] != "none" or config.industry["classification"] != "legacy":
+        return 6
     if config.uses_market_cap_proxy or "size" in config.variants:
         return 5
     preprocessing = config.raw["preprocess"]
@@ -99,7 +107,12 @@ def base_universe(config: Config, weeks: pd.DataFrame) -> pd.DataFrame:
             # ST remains an optional stock-pool input even in a raw-only study.
             if "is_st" in available and "is_st" not in history_columns:
                 history_columns = history_columns + ["is_st"]
+        history_columns = history_columns + [name for name in
+            ("st_source", "st_status_reason", "st_known", "st_name", "st_conflict")
+            if name in available and name not in history_columns]
         history = read_frame(history_path, history_columns, nullable_booleans=relaxed)
+        if config.requires_industry and not config.separate_industry_source and config.industry["column"] != "industry":
+            history = history.rename(columns={config.industry["column"]: "industry"})
         if "is_st" not in history:
             history["is_st"] = pd.Series(pd.NA, index=history.index, dtype="boolean")
         grid = asof_snapshot(grid, history, "history")
@@ -128,10 +141,80 @@ def base_universe(config: Config, weeks: pd.DataFrame) -> pd.DataFrame:
     return grid[grid.eligible].reset_index(drop=True)
 
 
+def _industry_controls(config: Config, base: pd.DataFrame) -> pd.DataFrame:
+    """Industry history is independent from ST and never filled from today's labels."""
+    result = base.copy()
+    if config.separate_industry_source:
+        path = config.source(config.industry["source"])
+        field = config.industry["column"]
+        if path is None or not path.is_file():
+            if not config.optional_control_sources:
+                raise DataGateError("缺少历史行业来源")
+            result["industry_source_date"] = pd.NaT
+            result["industry"] = pd.NA
+        else:
+            available = columns(path)
+            fields = [field] if field in available else []
+            if not fields and not config.optional_control_sources:
+                raise DataGateError(f"历史行业来源缺少字段 {field}")
+            provenance = [name for name in ("custom_class_code", "custom_class_name", "citic_level1_code",
+                "citic_level1_name", "zx1code", "zx2code", "zx3code", "industry_status",
+                "industry_interval_end", "industry_rule_override", "industry_ticker_override", "industry_mapping_status",
+                "zx1name", "zx2name", "zx3name", "industry_source")
+                if name in available and name not in fields]
+            source = read_frame(path, ["date", "code"] + fields + provenance)
+            if field not in source:
+                source[field] = pd.NA
+            source = source.rename(columns={field: "industry"})
+            if config.aiq_fill_enabled:
+                from .aiq_fill import filled_snapshot
+                result = filled_snapshot(result.drop(columns="industry"), source, ["industry"],
+                                         prefix="industry_source")
+                # Classification metadata must describe the actual donor of a
+                # carried label, not a newer incomplete classification event.
+                if provenance:
+                    donor = result[["code", "industry_value_source_date"]].merge(
+                        source[["date", "code"] + provenance].rename(columns={"date": "industry_value_source_date"}),
+                        on=["code", "industry_value_source_date"], how="left", validate="many_to_one")
+                    for name in provenance:
+                        if name in {"industry_status", "industry_mapping_status", "industry_source"}:
+                            continue
+                        result[name + "_original"] = result[name]
+                        result[name] = result[name].where(~result.industry_filled, donor[name].to_numpy())
+            else:
+                result = asof_snapshot(result.drop(columns="industry"), source, "industry_source")
+    elif config.requires_industry:
+        result["industry_source_date"] = result.history_date
+        if config.aiq_fill_enabled:
+            from .aiq_fill import filled_snapshot
+            field = config.industry["column"]
+            source = read_frame(config.source("history"), ["date", "code", field]).rename(columns={field: "industry"})
+            result = filled_snapshot(result.drop(columns=["industry", "industry_source_date"]), source,
+                                     ["industry"], prefix="industry_source")
+    if config.requires_industry and config.industry["classification"] == "citic_l1":
+        from .industry import normalize_industry
+        normalized = normalize_industry(result.industry)
+        for name in normalized:
+            result[name] = normalized[name]
+        result["industry"] = result.industry_name
+    elif config.requires_industry and config.industry["classification"] == "aiq_zx35":
+        from .aiq_industry import normalize_industry
+        normalized = normalize_industry(result.industry)
+        for name in normalized:
+            # Preserve richer adapter failure reasons on missing memberships.
+            if name == "industry_mapping_status" and name in result:
+                result[name] = result[name].where(result[name].notna(), normalized[name])
+            else:
+                result[name] = normalized[name]
+        result["industry"] = result.industry_name
+    return result
+
+
 def signal_panel(config: Config, weeks: pd.DataFrame, base: pd.DataFrame | None = None
                  ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     include_float_mcap = config.include_float_mcap
     base = base_universe(config, weeks) if base is None else base
+    base = _industry_controls(config, base)
     if config.requires_risk:
         risk_path = config.source("risk")
         optional_controls = config.optional_control_sources
@@ -142,7 +225,12 @@ def signal_panel(config: Config, weeks: pd.DataFrame, base: pd.DataFrame | None 
             available = set(columns(risk_path)) if optional_controls else set(RISK_FIELDS)
             fields = [field for field in RISK_FIELDS if field in available]
             risk = read_frame(risk_path, ["date", "code"] + fields)
-            controls = asof_snapshot(base, risk, "risk")
+            if config.aiq_fill_enabled and fields:
+                from .aiq_fill import filled_snapshot
+                controls = filled_snapshot(base, risk, fields, prefix="risk",
+                                           calendar=read_frame(config.source("calendar"), ["date"]).date)
+            else:
+                controls = asof_snapshot(base, risk, "risk")
             del risk
         for field in RISK_FIELDS:
             if field not in controls:
@@ -153,6 +241,8 @@ def signal_panel(config: Config, weeks: pd.DataFrame, base: pd.DataFrame | None 
         controls["risk_date"] = pd.NaT
     if config.uses_market_cap_proxy:
         controls = market_cap_snapshot(config, controls)
+    elif config.separate_market_cap_source or config.requires_float_mcap and config.aiq_fill_enabled:
+        controls = historical_market_cap_snapshot(config, controls)
     cap_column = config.market_cap_column
     controls["industry"] = controls.industry.replace(r"^\s*$", np.nan, regex=True)
     numeric_columns = ([cap_column] if config.requires_market_cap else []) + (RISK_FIELDS if config.requires_risk else [])
@@ -166,22 +256,45 @@ def signal_panel(config: Config, weeks: pd.DataFrame, base: pd.DataFrame | None 
     controls.to_parquet(config.output / "controls.parquet", index=False)
     blocks, coverage, failures = [], [], []
     for factor in config.factors:
-        source = read_frame(config.source(factor["source"]), ["date", "code", factor["column"]])
+        source_fields = ["date", "code", factor["column"]]
+        if config.aiq_fill_enabled:
+            from .aiq_fill import field_policy
+            if field_policy(factor["column"]) == "last" and "last" in columns(config.source(factor["source"])):
+                source_fields.append("last")
+        source = read_frame(config.source(factor["source"]), source_fields)
         source = source.rename(columns={factor["column"]: "value"})
-        source["value"] = source.value.replace([np.inf, -np.inf], np.nan)
-        joined = asof_snapshot(controls, source, "factor")
+        if config.aiq_fill_enabled:
+            from .aiq_fill import field_policy, filled_snapshot
+            joined = filled_snapshot(controls, source, ["value"], prefix="factor",
+                calendar=read_frame(config.source("calendar"), ["date"]).date,
+                fill_rules={"value": field_policy(factor["column"])})
+            joined["value_source_date"] = joined.value_value_source_date
+            joined["value"] = joined.value.replace([np.inf, -np.inf], np.nan)
+        else:
+            source["value"] = source.value.replace([np.inf, -np.inf], np.nan)
+            joined = asof_snapshot(controls, source, "factor")
         del source
         joined["factor"] = factor["name"]
+        joined = smooth_factor(joined, weeks, config.smoothing)
         joined["factor_ok"] = joined.value.notna()
-        joined["common_ok"] = joined.factor_ok & joined.controls_ok
+        smoothing = config.smoothing["method"] == "ema"
+        joined["signal_input_ok"] = joined.smoothed_value.notna() if smoothing else joined.factor_ok
+        joined["common_ok"] = joined.signal_input_ok & joined.controls_ok
         counts = joined.groupby("entry").agg(base_count=("code", "size"),
                     factor_available=("factor_ok", "sum"), common_count=("common_ok", "sum"),
+                    signal_input_available=("signal_input_ok", "sum"),
                     unknown_st_count=("is_st_unknown", "sum"),
                     unknown_suspension_count=("entry_suspension_unknown", "sum"))
         counts = counts.reindex(weeks.entry, fill_value=0)
         counts["factor"] = factor["name"]
         counts["missing_factor"] = counts.base_count - counts.factor_available
+        if config.aiq_fill_enabled:
+            counts["factor_original_missing"] = joined.value_original_missing.groupby(joined.entry).sum().reindex(counts.index, fill_value=0)
+            counts["factor_filled"] = joined.value_filled.groupby(joined.entry).sum().reindex(counts.index, fill_value=0)
         counts["missing_controls"] = counts.factor_available - counts.common_count
+        if smoothing:
+            counts["smoothing_unavailable_count"] = counts.factor_available - counts.signal_input_available
+            counts["missing_controls"] = counts.signal_input_available - counts.common_count
         denominator = counts.base_count.replace(0, np.nan)
         counts["raw_coverage"] = counts.factor_available / denominator
         counts["common_coverage"] = counts.common_count / denominator
@@ -190,16 +303,33 @@ def signal_panel(config: Config, weeks: pd.DataFrame, base: pd.DataFrame | None 
         if config.requires_market_cap:
             counts["market_cap_available"] = joined.groupby("entry").market_cap_available.sum().reindex(counts.index, fill_value=0)
             counts["market_cap_coverage"] = counts.market_cap_available / denominator
-        selected = joined[joined.common_ok if config.sample_policy == "common" else joined.factor_ok].copy()
+            if "float_mcap_filled" in joined:
+                counts["market_cap_filled"] = joined.float_mcap_filled.groupby(joined.entry).sum().reindex(counts.index, fill_value=0)
+        if config.requires_industry:
+            industry_valid = joined.industry.notna().groupby(joined.entry).sum()
+            counts["industry_available"] = industry_valid.reindex(counts.index, fill_value=0)
+            counts["industry_coverage"] = counts.industry_available / denominator
+            if "industry_filled" in joined:
+                counts["industry_filled"] = joined.industry_filled.groupby(joined.entry).sum().reindex(counts.index, fill_value=0)
+        selected = joined[joined.common_ok if config.sample_policy == "common" else joined.signal_input_ok].copy()
         zero = selected.value.eq(0).groupby(selected.entry).mean()
         ties = selected.groupby("entry").value.apply(lambda s: s.duplicated(keep=False).mean())
         counts["zero_fraction"] = zero.reindex(counts.index)
         counts["tie_fraction"] = ties.reindex(counts.index)
+        if smoothing:
+            input_dir = config.output / "factor_inputs"
+            input_dir.mkdir(parents=True, exist_ok=True)
+            joined[["entry", "exit", "cutoff", "code", "factor", "factor_date", "value"] + SMOOTHING_COLUMNS].to_parquet(
+                input_dir / f"{factor['name']}.parquet", index=False)
+            selected["_original_value"] = selected.value
+            selected["value"] = selected.smoothed_value
         signals, diagnostics = prepare_signals(selected, config.raw["preprocess"],
                                                include_float_mcap=include_float_mcap,
                                                variants=config.variants,
                                                sample_policy=config.sample_policy,
                                                market_cap_column=cap_column)
+        if smoothing:
+            signals["value"] = signals.pop("_original_value")
         for variant in config.variants:
             variant_counts = signals.loc[signals.variant.eq(variant)].groupby("entry").size()
             counts[f"variant_{variant}_count"] = variant_counts.reindex(counts.index, fill_value=0)
@@ -215,6 +345,19 @@ def signal_panel(config: Config, weeks: pd.DataFrame, base: pd.DataFrame | None 
             keep.append("float_mcap")
         if config.uses_market_cap_proxy:
             keep.extend(PROXY_COLUMNS)
+        elif config.separate_market_cap_source:
+            keep.extend(name for name in HISTORY_COLUMNS if name in signals)
+        if smoothing:
+            keep.extend(SMOOTHING_COLUMNS)
+        keep.extend(name for name in ("industry_source_date", "industry_raw", "industry_code", "industry_name",
+                                      "industry_mapping_status", "custom_class_code", "custom_class_name",
+                                      "citic_level1_code", "citic_level1_name", "zx1code", "zx2code", "zx3code",
+                                      "industry_status", "industry_rule_override", "industry_ticker_override", "st_source", "st_status_reason",
+                                      "st_known", "st_conflict") if name in signals)
+        if config.aiq_fill_enabled:
+            keep.extend(name for name in signals if
+                (name in {"value_source_date"} or name.endswith(("_original", "_original_missing", "_filled",
+                    "_value_source_date", "_fill_anchor_date", "_fill_method", "_original_invalid", "_grid_date"))) and name not in keep)
         blocks.append(signals[keep])
     return pd.concat(blocks, ignore_index=True), pd.concat(coverage, ignore_index=True), pd.concat(failures, ignore_index=True)
 
@@ -230,27 +373,56 @@ def make_labels(config: Config, features: pd.DataFrame) -> pd.DataFrame:
                                     price.get("close_column", "acc_close"): "close_level"})
     status = _status_frame(config)
     base = features[["entry", "exit", "code", "delisting_date"]].drop_duplicates().copy().reset_index(drop=True)
+    if config.aiq_fill_enabled:
+        lifetimes = read_frame(config.source("stocks"), ["code", "listing_date"])
+        base = base.merge(lifetimes, on="code", how="left", validate="many_to_one")
+        calendar = read_frame(config.source("calendar"), ["date"]).date
     if base.duplicated(["entry", "exit", "code"]).any():
         raise ValueError("inconsistent label metadata")
     base["row_id"] = np.arange(len(base))
     for endpoint in ("entry", "exit"):
         target = base[["row_id", "code", endpoint]].rename(columns={endpoint: "date"})
-        point = target.merge(quotes[["date", "code", "open_level"]], on=["date", "code"], how="left", validate="many_to_one")
-        point = point.merge(status, on=["date", "code"], how="left", validate="many_to_one")
-        point["cutoff"] = point.date - pd.Timedelta(nanoseconds=1)
-        previous = asof_snapshot(point[["row_id", "code", "cutoff"]],
-                                 quotes[["date", "code", "close_level"]], "valuation")
-        point = point.merge(previous[["row_id", "close_level"]], on="row_id", validate="one_to_one")
-        suspended = point.suspended.astype("boolean").fillna(False).astype(bool)
-        point["level"] = point.open_level.where(~suspended, point.close_level)
-        point["status_missing"] = point.suspended.isna()
-        proxy_carry = (config.data_policy["mode"] in ("proxy", "classic") and
-                       price.get("suspension_valuation", "previous_adjusted_close" if classic else None)
-                       == "previous_adjusted_close")
-        point["valuation_proxy"] = suspended & proxy_carry & (not bool(price.get("suspended_total_return", False)))
-        point["valuation_unverified"] = suspended & (not (
-            bool(price.get("suspended_total_return", False)) or proxy_carry))
+        if config.aiq_fill_enabled:
+            from .aiq_fill import field_policy, filled_snapshot
+            target["cutoff"] = target.date
+            point = filled_snapshot(target, quotes[["date", "code", "open_level"]], ["open_level"],
+                prefix="price", calendar=calendar,
+                fill_rules={"open_level": field_policy(price.get("open_column", "acc_open"))})
+            point = point.merge(status, on=["date", "code"], how="left", validate="many_to_one")
+            source_day = point.open_level_value_source_date
+            # Eligibility is separate from field filling. Historical prices
+            # outside a security's life cannot invent an entry or settlement.
+            lifecycle = point[["row_id"]].merge(base[["row_id", "listing_date", "delisting_date"]], on="row_id", validate="one_to_one")
+            outside = source_day.lt(lifecycle.listing_date)
+            outside |= point.open_level_filled & lifecycle.delisting_date.notna() & point.date.ge(lifecycle.delisting_date)
+            point["level"] = point.open_level.where(~outside)
+            point["price_original"] = point.open_level_original
+            point["price_original_missing"] = point.open_level_original_missing
+            point["price_filled"] = point.open_level_filled
+            point["price_source_date"] = source_day
+            point["price_lifecycle_rejected"] = outside
+            point["status_missing"] = point.suspended.isna()
+            point["valuation_proxy"] = point.open_level_filled
+            point["valuation_unverified"] = False
+        else:
+            point = target.merge(quotes[["date", "code", "open_level"]], on=["date", "code"], how="left", validate="many_to_one")
+            point = point.merge(status, on=["date", "code"], how="left", validate="many_to_one")
+            point["cutoff"] = point.date - pd.Timedelta(nanoseconds=1)
+            previous = asof_snapshot(point[["row_id", "code", "cutoff"]],
+                                     quotes[["date", "code", "close_level"]], "valuation")
+            point = point.merge(previous[["row_id", "close_level"]], on="row_id", validate="one_to_one")
+            suspended = point.suspended.astype("boolean").fillna(False).astype(bool)
+            point["level"] = point.open_level.where(~suspended, point.close_level)
+            point["status_missing"] = point.suspended.isna()
+            proxy_carry = (config.data_policy["mode"] in ("proxy", "classic") and
+                           price.get("suspension_valuation", "previous_adjusted_close" if classic else None)
+                           == "previous_adjusted_close")
+            point["valuation_proxy"] = suspended & proxy_carry & (not bool(price.get("suspended_total_return", False)))
+            point["valuation_unverified"] = suspended & (not (
+                bool(price.get("suspended_total_return", False)) or proxy_carry))
         keep = ["row_id", "level", "suspended", "status_missing", "valuation_unverified", "valuation_proxy"] + [c for c in ("limit_up", "limit_down") if c in point]
+        if config.aiq_fill_enabled:
+            keep.extend(["price_original", "price_original_missing", "price_filled", "price_source_date", "price_lifecycle_rejected"])
         base = base.merge(point[keep].rename(columns={c: f"{endpoint}_{c}" for c in keep if c != "row_id"}),
                           on="row_id", validate="one_to_one")
     base["label_ready"] = base.exit
@@ -275,6 +447,8 @@ def make_labels(config: Config, features: pd.DataFrame) -> pd.DataFrame:
     # A carried pre-delisting mark is not an observed exit price or a settlement.
     missing_delisting_exit = base.delisting_without_terminal & (
         (not classic) | base.exit_suspended.astype("boolean").fillna(False).astype(bool))
+    if config.aiq_fill_enabled:
+        missing_delisting_exit |= base.delisting_without_terminal & base.exit_price_filled
     invalid_exit = ~np.isfinite(base.exit_level) | base.exit_level.lt(0)
     if classic:
         # A vendor zero price is missing market data; only explicit terminal
@@ -306,6 +480,47 @@ def make_labels(config: Config, features: pd.DataFrame) -> pd.DataFrame:
         elif "limit_" in col:
             base["trade_restriction_unknown"] = True
     return base.drop(columns=["row_id", "delisting_date"])
+
+
+def _export_data_usage(config: Config, checked: dict, labels: pd.DataFrame) -> None:
+    """Publish source and sample denominators, without making them new data gates."""
+    if not config.raw.get("input_manifest"):
+        return
+    sources = []
+    selection = checked.get("input_provenance", {}).get("manifest", {}).get("source_selection", {})
+    for name, info in checked["sources"].items():
+        sources.append({"入口": name, "文件": info["fingerprint"]["path"], "记录数": info.get("rows"),
+            "股票数": info.get("codes"), "起始日期": info.get("start"), "结束日期": info.get("end"),
+            "本次读取字段": ", ".join(info.get("selected_columns", [])), "原始来源与选择": selection.get(name, "")})
+    pd.DataFrame(sources).to_csv(config.output / "data_usage.csv", index=False)
+    universe = pd.read_parquet(config.output / "universe.parquet")
+    mature = universe.loc[~universe.short_listing]
+    controls = pd.read_parquet(config.output / "controls.parquet")
+    metrics = []
+    def add(name, count, total, note):
+        metrics.append({"指标": name, "记录数": int(count), "分母": int(total),
+            "比例": count / total if total else np.nan, "说明": note})
+    add("ST状态未知", mature.is_st.isna().sum(), len(mature), "上市满最小交易日后的股期次；未知按配置保留，不认证为非ST")
+    add("已知ST", mature.is_st.fillna(False).sum(), len(mature), "这部分在形成基础股票池时剔除")
+    add("入场停牌未知", mature.entry_suspension_unknown.sum(), len(mature), "代理状态亦保留来源，不认证完整交易状态")
+    add("行业有效", controls.industry.notna().sum(), len(controls), "分母为过滤后的基础股票池股期次")
+    if config.aiq_fill_enabled and "industry_filled" in controls:
+        add("行业AIQ填充", controls.industry_filled.sum(), len(controls), "原始行业缺失与填后覆盖分开；供值日不改成目标日")
+    if config.requires_market_cap:
+        add("流通市值有效", controls.market_cap_available.sum(), len(controls), "仅需要市值的版本要求有限正值；独立样本中不影响原始版本")
+        if "float_mcap_filled" in controls:
+            add("流通市值AIQ填充", controls.float_mcap_filled.sum(), len(controls), "只填NaN；原始0/负/无穷不会被旧正值替代")
+    if config.aiq_fill_enabled:
+        for endpoint in ("entry", "exit"):
+            add(f"{endpoint}开盘原始缺失", labels[f"{endpoint}_price_original_missing"].sum(), len(labels), "补缺前原始网格缺失")
+            add(f"{endpoint}开盘AIQ填充", labels[f"{endpoint}_price_filled"].sum(), len(labels), "按开盘源字段规则；生命周期外填充值不可作为有效价格")
+    add("未来收益未知", labels.unresolved.sum(), len(labels), "冻结基础样本后检查；未来缺失不改变当期排名/分组")
+    add("退市退出未解决", (labels.delisting_without_terminal & labels.unresolved).sum(), len(labels), "保留缺失，未用旧估值或零值冒充已验证结算")
+    pd.DataFrame(metrics).to_csv(config.output / "data_quality_summary.csv", index=False)
+    grouping = [name for name in ("custom_class_code", "industry", "citic_level1_code", "citic_level1_name") if name in controls]
+    if grouping:
+        distribution = controls.groupby(grouping, dropna=False).agg(股期次数=("code", "size"), 股票数=("code", "nunique")).reset_index()
+        distribution.to_csv(config.output / "industry_distribution.csv", index=False)
 
 
 def build_panel(config: Config) -> dict:
@@ -348,6 +563,8 @@ def build_panel(config: Config) -> dict:
                 "periods": len(weeks), "rebalance_frequency": config.rebalance_frequency,
                 "sample_policy": config.sample_policy,
                 "market_cap": config.market_cap if config.requires_market_cap else None,
+                "smoothing": config.smoothing, "industry": config.industry,
+                "missing_values": config.missing_values,
                 "unknown_st_base_rows": int(base.is_st_unknown.sum()),
                 "unknown_suspension_base_rows": int(base.entry_suspension_unknown.sum()),
                 "signal_start": weeks.cutoff.min(), "signal_end": weeks.cutoff.max(),
@@ -355,6 +572,11 @@ def build_panel(config: Config) -> dict:
                 "source_fingerprints": {n: d["fingerprint"] for n, d in checked["sources"].items()},
                 "missing_source_paths": {name: str(config.source(name)) for name in source_columns(config)
                                          if config.source(name) is not None and not config.source(name).is_file()}}
+    if config.raw.get("input_manifest"):
+        provenance = config.raw["input_manifest"]
+        from pathlib import Path
+        manifest["input_manifest_fingerprint"] = (fingerprint(Path(provenance))
+            if Path(provenance).is_file() else None)
     write_json(config.output / "panel_manifest.json", manifest)
     # Features and group assignments are on disk before forward returns are connected.
     labels = make_labels(config, base)
@@ -399,6 +621,12 @@ def build_panel(config: Config) -> dict:
         manifest["status"] = "ready"
     files = ["periods.parquet", "weeks.parquet", "universe.parquet", "controls.parquet", "features.parquet", "labels.parquet",
              "benchmark.csv", "coverage.csv", "preprocessing_failures.csv"]
+    if config.smoothing["method"] == "ema":
+        files.extend(f"factor_inputs/{factor['name']}.parquet" for factor in config.factors)
+    _export_data_usage(config, checked, labels)
+    if config.raw.get("input_manifest"):
+        files.extend(["data_usage.csv", "data_quality_summary.csv", "industry_distribution.csv"])
+        files = [name for name in files if (config.output / name).is_file()]
     manifest["artifact_fingerprints"] = {n: fingerprint(config.output / n) for n in files}
     write_json(config.output / "panel_manifest.json", manifest)
     if manifest["status"] != "ready":
@@ -422,6 +650,12 @@ def ensure_panel(config: Config) -> dict:
         source = config.source(name)
         if not source or not source.is_file() or fingerprint(source) != old:
             raise DataGateError(f"源文件 {name} 已改变；请新建输出目录重新构建")
+    if config.raw.get("input_manifest"):
+        from pathlib import Path
+        provenance = Path(config.raw["input_manifest"])
+        current = fingerprint(provenance) if provenance.is_file() else None
+        if current != manifest.get("input_manifest_fingerprint"):
+            raise DataGateError("接入数据的来源说明已改变；请新建输出目录重新构建")
     for name in manifest.get("missing_source_paths", {}):
         source = config.source(name)
         if source is not None and source.is_file():

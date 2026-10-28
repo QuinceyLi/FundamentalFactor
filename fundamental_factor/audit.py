@@ -38,9 +38,12 @@ def source_columns(config: Config) -> dict[str, list[str]]:
     classic = config.data_policy["mode"] == "classic"
     history = ["date", "code"]
     history_available = optional_columns(config.source("history"))
-    if config.requires_industry and (not config.optional_control_sources or "industry" in history_available):
-        history.append("industry")
-    if config.requires_float_mcap and (not config.optional_control_sources or "float_mcap" in history_available):
+    industry_column = config.industry["column"]
+    if (config.requires_industry and not config.separate_industry_source
+            and (not config.optional_control_sources or industry_column in history_available)):
+        history.append(industry_column)
+    if (config.requires_float_mcap and not config.separate_market_cap_source
+            and (not config.optional_control_sources or "float_mcap" in history_available)):
         history.append("float_mcap")
     path = config.source("history")
     if not classic or "is_st" in optional_columns(path):
@@ -61,6 +64,18 @@ def source_columns(config: Config) -> dict[str, list[str]]:
             available = optional_columns(config.source("risk"))
             exposure_columns = [column for column in RISK_FIELDS if column in available]
         result["risk"] = ["date", "code"] + exposure_columns
+    if config.separate_industry_source:
+        name = config.industry["source"]
+        result.setdefault(name, ["date", "code"])
+        if not config.optional_control_sources or industry_column in optional_columns(config.source(name)):
+            if industry_column not in result[name]:
+                result[name].append(industry_column)
+    if config.separate_market_cap_source:
+        name, field = config.market_cap["source"], config.market_cap["column"]
+        result.setdefault(name, ["date", "code"])
+        if not config.optional_control_sources or field in optional_columns(config.source(name)):
+            if field not in result[name]:
+                result[name].append(field)
     if config.raw.get("execution", {}).get("enabled"):
         result["execution_status"] = ["date", "code", "suspended", "limit_up", "limit_down"]
         if config.raw["execution"].get("price_mode", "raw") == "raw":
@@ -130,7 +145,8 @@ def audit(config: Config) -> dict:
     execution_names = {"execution_quotes", "execution_status", "corporate_actions", "execution_terminal"}
     optional = {"terminal", "status"} if classic else {"terminal", "execution_terminal"}
     optional.add("execution_terminal")
-    if classic and not config.requires_industry and not config.requires_float_mcap:
+    if (classic and (not config.requires_industry or config.separate_industry_source)
+            and (not config.requires_float_mcap or config.separate_market_cap_source)):
         optional.add("history")
     if config.optional_control_sources:
         optional.update({"history", "risk"})
@@ -138,13 +154,44 @@ def audit(config: Config) -> dict:
         if config.raw.get("execution", {}).get("enabled"):
             required_names.update(execution_names)
         optional.update(set(market_cap_source_columns(config)) - required_names)
+        if config.separate_industry_source and config.industry["source"] not in required_names:
+            optional.add(config.industry["source"])
+        if config.separate_market_cap_source and config.market_cap["source"] not in required_names:
+            optional.add(config.market_cap["source"])
         result["warnings"].append("各信号版本独立取样：原始版本不要求行业、市值或Barra；控制数据缺失仅影响需要它们的中性化版本。版本间表现差异也可能来自样本差异。")
     proxy_fields = market_cap_source_columns(config)
+    result["smoothing"] = config.smoothing
+    result["industry"] = config.industry
+    result["missing_values"] = config.missing_values
+    if config.aiq_fill_enabled:
+        result["warnings"].append("缺失处理采用AIQ字段矩阵规则：volume/amount/return/vwap首个非空后补0；open/high/low/turnover等保留；acc_open/acc_close、市值、普通因子等前填；日内指定字段用last。保留原值、原始缺失与真实供值日；不会向未来回填，ST仍按事件而非矩阵填充。")
+    if config.industry["classification"] == "citic_l1":
+        result["warnings"].append("行业采用中信一级规范名称；仅使用截点前已存在的历史记录，未知或非中信原始类别保持缺失，不用当前分类回填历史。")
+        from .industry import industry_catalog
+        industry_catalog().to_csv(config.output / "industry_mapping.csv", index=False)
+    elif config.industry["classification"] == "aiq_zx35":
+        from .aiq_industry import industry_catalog
+        industry_catalog().to_csv(config.output / "industry_mapping.csv", index=False)
+        result["warnings"].append("行业按 AIQ FACFUNC.get_industry → Toolbox.zxclassified/get_classname 的35类规则及名称处理；它由中信多级行业派生，不等同中信一级30类。保留原始层级和有效区间，空缺/冲突不向过去填充。")
     if config.uses_market_cap_proxy:
         result["market_cap"] = {**config.market_cap, "column": config.market_cap_column,
                                 "formula": "close * volume * 100 / (turnover / 100)",
                                 "is_proxy": True}
         result["warnings"].append("市值中性化使用未复权收盘价 × 成交量(手) × 100 ÷ (换手率(%) / 100) 的行情代理；不声称等同已验证的实际流通市值。仅配对同日且截点前的原始价格/成交量/换手率，非正或非有限输入按缺失处理。")
+    elif config.requires_float_mcap:
+        result["market_cap"] = {**config.market_cap, "column": "float_mcap", "is_proxy": False}
+        if config.separate_market_cap_source:
+            result["warnings"].append("流通市值从独立历史来源按截点向后匹配；float_mcap 单位为元。" +
+                ("AIQ模式仅对NaN前填，保留原始0/负/无穷不跳过；随后检查有限正值，原始无效与填充均披露。" if config.aiq_fill_enabled else
+                 "显式无效更新保留缺失，不回跳到旧有效值；") + "缺失只影响需要市值控制的版本。")
+    if config.raw.get("input_manifest"):
+        import json
+        provenance = Path(config.raw["input_manifest"])
+        if provenance.is_file():
+            result["input_provenance"] = {"fingerprint": fingerprint(provenance),
+                                          "manifest": json.loads(provenance.read_text())}
+        else:
+            result["warnings"].append("接入数据的来源说明文件缺失；原始输入审计仍独立进行。")
 
     def blocking(name: str, message: str) -> None:
         result["execution_blocking" if name in execution_names else "blocking"].append(message)
@@ -173,13 +220,19 @@ def audit(config: Config) -> dict:
                 raise ValueError(f"missing columns {sorted(missing)}")
             if config.optional_control_sources and name in ("history", "risk"):
                 expected = (RISK_FIELDS if name == "risk" else
-                            (["industry"] if config.requires_industry else []) +
-                            (["float_mcap"] if config.requires_float_mcap else []))
+                            ([config.industry["column"]] if config.requires_industry and not config.separate_industry_source else []) +
+                            (["float_mcap"] if config.requires_float_mcap and not config.separate_market_cap_source else []))
                 if absent := set(expected) - set(available):
                     result["warnings"].append(f"{name} 缺少控制字段 {sorted(absent)}；仅影响需要这些字段的版本，原始版本不因此删除股票。")
             if config.optional_control_sources and name in proxy_fields:
                 if absent := set(proxy_fields[name]) - set(available):
                     result["warnings"].append(f"{name} 缺少市值代理字段 {sorted(absent)}；仅影响需要市值的版本，原始版本不因此删除股票。")
+            if (config.optional_control_sources and config.separate_industry_source
+                    and name == config.industry["source"] and config.industry["column"] not in available):
+                result["warnings"].append(f"{name} 缺少中信行业字段；行业中性化版本无有效样本，原始版本继续。")
+            if (config.optional_control_sources and config.separate_market_cap_source
+                    and name == config.market_cap["source"] and config.market_cap["column"] not in available):
+                result["warnings"].append(f"{name} 缺少流通市值字段；仅影响需要市值的版本，原始版本继续。")
             selected = required + (["is_a_share"] if name == "stocks" and "is_a_share" in available else [])
             frame = read_frame(path, selected, nullable_booleans=(name == "execution_status" or
                                 relaxed and name in ("history", "status")))
@@ -287,7 +340,9 @@ def audit(config: Config) -> dict:
         result["warnings"].append("入场日全天成交量停牌代理属于事后可见的研究过滤口径，不能视为开盘前已知的可成交状态；不使用退出日状态筛选信号。")
         if adjusted_proxy:
             result["warnings"].append("收益按核验后的复权价格变化计算，未将完整公司行动或实际现金结算覆盖视为已验证的全收益。")
-        if contract.get("suspension_valuation", "previous_adjusted_close" if classic else None) == "previous_adjusted_close":
+        if config.aiq_fill_enabled:
+            result["warnings"].append("收益端点按AIQ源字段填充：acc_open延续自身历史开盘，而非前收盘。保留原始缺口和供值日；上市前供值/退市后无观察价格不作为有效交易或结算。日return补0不会直接套到周/月收益。")
+        elif contract.get("suspension_valuation", "previous_adjusted_close" if classic else None) == "previous_adjusted_close":
             result["warnings"].append("停牌端点延续此前复权收盘价估值；这是简化估值，非该日实际成交价或完整现金分红记账。")
         if config.data_policy["missing_returns"] == "report":
             result["warnings"].append("冻结信号后缺失收益不剔除持仓、不补零；IC按可用标签计算并披露覆盖率，不完整组合收益及连续绩效记为缺失。")

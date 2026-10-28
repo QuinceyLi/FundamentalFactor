@@ -163,6 +163,28 @@ def run_research(config: Config) -> dict:
         card["preprocess"] = {"winsorize": config.raw["preprocess"].get("winsorize", True),
                               "standardize": config.raw["preprocess"].get("standardize", True)}
         card["market_cap"] = config.market_cap if config.requires_market_cap else None
+        card["smoothing"] = config.smoothing
+        card["industry"] = config.industry
+        card["missing_values"] = config.missing_values
+        card["strategy_diagnostics"] = {}
+        for variant in config.variants:
+            performance = tables["performance"]
+            view = performance[performance.variant.eq(variant)].set_index("portfolio")
+            long = view.loc["Q10"]
+            spread = view.loc["Q10-Q1"]
+            card["strategy_diagnostics"][variant] = {
+                "long_portfolio": "Q10", "short_portfolio": "Q1",
+                "long_excess_sharpe": long.excess_sharpe,
+                "long_excess_sharpe_n_periods": long.excess_sharpe_n_periods,
+                "long_short_excess_sharpe": spread.excess_sharpe,
+                "long_short_excess_sharpe_n_periods": spread.excess_sharpe_n_periods,
+                "long_mean_turnover_one_way": long.mean_turnover_one_way,
+                "long_p95_turnover_one_way": long.p95_turnover_one_way,
+                "long_high_turnover_fraction": long.high_turnover_fraction,
+                "long_turnover_observations": long.turnover_observations,
+                "long_turnover_missing_periods": long.turnover_missing_periods,
+                "turnover_warning_threshold": config.raw["metrics"].get("turnover_warning_threshold", .5),
+            }
         card["artifacts"] = artifacts
         card["data_policy"] = config.data_policy
         card["price_contract"] = config.raw.get("price_contract", {})

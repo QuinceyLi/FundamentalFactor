@@ -116,6 +116,11 @@ def asof_snapshot(left: pd.DataFrame, right: pd.DataFrame, prefix: str) -> pd.Da
     """Last *record*, not last nonmissing value; explicit null updates are preserved."""
     left, right = left.copy(), right.copy()
     left["code"], right["code"] = left.code.astype("string"), right.code.astype("string")
+    # Pandas/Arrow can preserve seconds or milliseconds in otherwise identical
+    # timestamp columns. A common precision prevents incompatible merge keys
+    # while retaining the nanosecond immediately-before-entry signal cutoff.
+    left["cutoff"] = pd.to_datetime(left.cutoff).astype("datetime64[ns]")
+    right["date"] = pd.to_datetime(right.date).astype("datetime64[ns]")
     right = right.rename(columns={"date": f"{prefix}_date"})
     return pd.merge_asof(left.sort_values("cutoff"), right.sort_values(f"{prefix}_date"),
                          left_on="cutoff", right_on=f"{prefix}_date", by="code",

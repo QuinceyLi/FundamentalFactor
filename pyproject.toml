@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fundamental-factor"
-version = "0.2.0"
+version = "0.3.0"
 description = "Point-in-time weekly single-factor backtests and standalone reports"
 requires-python = ">=3.10"
 dependencies = ["numpy", "pandas", "pyarrow", "scipy", "statsmodels", "openpyxl"]
