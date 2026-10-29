@@ -148,8 +148,11 @@ def build_report_data(run_dir) -> dict:
         f={'name':name,'label':item.get('label',configured[name].get('label',name)),
            'summary':load_json(folder/'summary.json') or item,
            'coverage':_records(coverage.loc[coverage.factor.eq(name)]) if 'factor' in coverage else [],
-           'sample':item.get('sample',{})}
-        for key,filename in [('portfolio','portfolio_weekly.csv'),('ic','ic_weekly.csv'),('performance','performance.csv'),('annual','annual_performance.csv'),('ic_summary','ic_summary.csv')]:
+           'sample':item.get('sample',{}),
+           'evaluation_window':item.get('evaluation_window',{})}
+        if not f['evaluation_window']:
+            f['evaluation_window']=f['summary'].get('evaluation_window',{})
+        for key,filename in [('portfolio','portfolio_weekly.csv'),('ic','ic_weekly.csv'),('performance','performance.csv'),('annual','annual_performance.csv'),('ic_summary','ic_summary.csv'),('excluded_periods','excluded_periods.csv')]:
             f[key]=_records(_csv(folder/filename))
             if (folder/filename).is_file(): payload['links'].append({'name':f'{name}/{filename}','href':f'factors/{quote(name)}/{filename}'})
         f['execution']=_execution(folder,item.get('execution',{}))

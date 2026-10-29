@@ -169,7 +169,8 @@ def _turnover_diagnostics(turnover, shape, initial_build, threshold) -> dict:
 
 def performance_metrics(returns, turnover=None, excess_returns=None,
                         annualization: int = 52, target_turnover=None,
-                        initial_build=None, turnover_warning_threshold: float = .5) -> dict:
+                        initial_build=None, turnover_warning_threshold: float = .5,
+                        entries=None, exits=None) -> dict:
     """Attachment-compatible CAGR/volatility statistics on a full weekly grid.
 
     Gaps are never compressed for cumulative results.  Valid-period volatility
@@ -179,7 +180,8 @@ def performance_metrics(returns, turnover=None, excess_returns=None,
     if annualization <= 0:
         raise ValueError("annualization must be positive")
     values = np.asarray(returns, dtype=float)
-    result = _return_metrics(values, annualization)
+    breaks = _calendar_breaks(len(values), entries, exits)
+    result = _return_metrics(_values_with_gaps(values, breaks), annualization)
     result.update(_turnover_diagnostics(turnover, values.shape, initial_build,
                                        turnover_warning_threshold))
     result["annual_turnover"] = np.nan
@@ -196,9 +198,9 @@ def performance_metrics(returns, turnover=None, excess_returns=None,
             raise ValueError("Returns and target turnover must share the same weekly grid")
         # This describes changes to the signal's target weights, independently
         # of realized price drift. A missing target cannot be inferred as cash.
-        if len(target_traded) and np.isfinite(target_traded).all():
+        if len(target_traded) and np.isfinite(target_traded).all() and not breaks.any():
             result["annual_target_turnover"] = float(target_traded.mean() * annualization)
-    excess = (_return_metrics(excess_returns, annualization) if excess_returns is not None
+    excess = (_return_metrics(_values_with_gaps(excess_returns, breaks), annualization) if excess_returns is not None
               else {key: np.nan for key in _return_metrics([], annualization)})
     if excess_returns is not None and np.asarray(excess_returns).shape != values.shape:
         raise ValueError("Returns and excess returns must share the same weekly grid")
@@ -220,15 +222,42 @@ def performance_metrics(returns, turnover=None, excess_returns=None,
     return result
 
 
-def _segmented_path(values, compound: bool = True) -> tuple[list[float], list[int | None]]:
+def _calendar_breaks(length: int, entries=None, exits=None) -> np.ndarray:
+    """Locate discontinuities without assuming that a month has a fixed length."""
+    result = np.zeros(length, dtype=bool)
+    if entries is None and exits is None:
+        return result
+    if entries is None or exits is None or len(entries) != length or len(exits) != length:
+        raise ValueError("Entry and exit dates must share the return period grid")
+    entry_dates, exit_dates = pd.to_datetime(entries), pd.to_datetime(exits)
+    if entry_dates.isna().any() or exit_dates.isna().any():
+        raise ValueError("Entry and exit dates must not contain missing dates")
+    result[1:] = np.asarray(entry_dates)[1:] != np.asarray(exit_dates)[:-1]
+    return result
+
+
+def _values_with_gaps(values, breaks: np.ndarray) -> np.ndarray:
+    """Keep absent calendar periods visible to cumulative statistics and HAC."""
+    values = np.asarray(values, dtype=float)
+    if values.shape != breaks.shape:
+        raise ValueError("Values and calendar breaks must share the return period grid")
+    return np.insert(values, np.flatnonzero(breaks), np.nan) if breaks.any() else values
+
+
+def _segmented_path(values, compound: bool = True, *, entries=None, exits=None
+                    ) -> tuple[list[float], list[int | None]]:
     """Rebase valid runs after gaps; never connect an invalid gap with a line."""
     path, ids, running, segment, active, bankrupt = [], [], 1.0 if compound else 0.0, 0, False, False
     terminal_value = np.nan
-    for value in np.asarray(values, dtype=float):
+    values = np.asarray(values, dtype=float)
+    breaks = _calendar_breaks(len(values), entries, exits)
+    for value, discontinuous in zip(values, breaks):
         if bankrupt:
             path.append(terminal_value)
             ids.append(segment if np.isfinite(terminal_value) else None)
             continue
+        if discontinuous:
+            active = False
         if not np.isfinite(value):
             path.append(np.nan)
             ids.append(None)
@@ -296,11 +325,12 @@ def _prepare_inputs(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
         raise ValueError("Signal rows fall outside the requested weekly grid")
     bench = weeks[["entry", "exit"]].merge(
         benchmark, on=["entry", "exit"], how="left", validate="one_to_one")
-    if not allow_missing and not np.isfinite(bench["return"].to_numpy(dtype=float)).all():
+    active_periods = bench.entry.isin(signals.entry)
+    if not allow_missing and not np.isfinite(bench.loc[active_periods, "return"].to_numpy(dtype=float)).all():
         raise DataGateError("The independent base-universe benchmark has unresolved weekly returns")
     if "unresolved" in bench:
         unresolved_benchmark = bench.unresolved.astype("boolean").fillna(True)
-        if not allow_missing and unresolved_benchmark.any():
+        if not allow_missing and (unresolved_benchmark & active_periods).any():
             raise DataGateError("The independent base-universe benchmark has unresolved labels")
         if missing_returns != "available_case":
             bench.loc[unresolved_benchmark, "return"] = np.nan
@@ -360,17 +390,26 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
     by_week = {(entry, variant): block for (entry, variant), block in
                joined.groupby(["entry", "variant"], sort=False)}
     empty = joined.iloc[:0]
-    ic_rows, portfolio_rows, holding_rows, holding_chunks = [], [], [], []
+    ic_rows, portfolio_rows, holding_rows, holding_chunks, excluded_rows = [], [], [], [], []
     previous: dict[tuple[str, str], tuple[dict, dict]] = {}
     previous_targets: dict[tuple[str, str], dict | None] = {}
-    unknown_previous: set[tuple[str, str]] = set()
     dead_portfolios: dict[tuple[str, str], str] = {}
     funded_portfolios: set[tuple[str, str]] = set()
+    previous_exit = None
 
     for week in weeks.itertuples(index=False):
+        if previous_exit is not None and week.entry != previous_exit:
+            previous.clear()
+            previous_targets.clear()
+            funded_portfolios.clear()
+        previous_exit = week.exit
         base_return = float(benchmark_map[week.entry])
         for variant in variants:
             block = by_week.get((week.entry, variant), empty)
+            signal_known = len(block) > 0
+            if not signal_known:
+                excluded_rows.append({"entry": week.entry, "exit": week.exit, "variant": variant,
+                                      "n_stocks": 0, "reason": "missing_signal"})
             masks = {"ALL": np.ones(len(block), dtype=bool), "TOP20": block.percentile > .8,
                      "TOP50": block.percentile > .5, "BOTTOM50": block.percentile <= .5,
                      "BOTTOM20": block.percentile <= .2}
@@ -379,6 +418,7 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
                 for method in ("spearman", "pearson"):
                     ic_rows.append({"entry": week.entry, "exit": week.exit, "variant": variant,
                                     "method": method, "subset": subset, "n_stocks": len(selected),
+                                    "signal_available": signal_known,
                                     "n_labels": int(selected.label_available.sum()),
                                     "label_coverage": float(selected.label_available.mean()) if len(selected) else np.nan,
                                     "ic": rank_ic(selected.signal, selected["return"], method)})
@@ -387,11 +427,9 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
                 group = block if portfolio == "ALL" else block.loc[block.group == int(portfolio[1:])]
                 key = (variant, portfolio)
                 n = len(group)
-                signal_known = len(block) > 0
                 empty_cash = bool(empty_groups == "cash" and signal_known and n == 0)
                 old, old_returns = previous.get(key, (None, None))
-                drift_known = (key not in unknown_previous and
-                               (old is None or all(np.isfinite(old_returns[c]) for c in old)))
+                drift_known = old is None or all(np.isfinite(old_returns[c]) for c in old)
                 if old and drift_known and sum(old[c] * (1 + old_returns[c]) for c in old) <= 0:
                     dead_portfolios[key] = "bankruptcy"
                     previous.pop(key, None)
@@ -419,7 +457,7 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
                                 0. if empty_cash and complete else np.nan)
                 if empty_cash and not dead:
                     reason = "empty_group_cash"
-                elif not signal_known and available_case:
+                elif not signal_known:
                     reason = "missing_signal"
                 elif n and not dead and not complete:
                     reason = "missing_held_return"
@@ -442,6 +480,7 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
                 restriction = float(group.trade_restricted.astype("boolean").mean()) if n and group.trade_restricted.notna().any() else np.nan
                 row = {"entry": week.entry, "exit": week.exit, "variant": variant,
                        "portfolio": portfolio, "n_stocks": n, "return": stock_return,
+                       "signal_available": signal_known,
                        "n_labels": n_labels,
                        "label_coverage": float(group.label_available.mean()) if n else np.nan,
                        "benchmark_return": base_return,
@@ -457,7 +496,7 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
                 period_results[portfolio] = row
                 portfolio_rows.append(row)
                 ledger_codes = target.keys() | drifted.keys() | (old or {}).keys()
-                if available_case and not signal_known:
+                if not signal_known:
                     ledger_codes = set()
                 for code in sorted(ledger_codes):
                     holding_rows.append({"entry": week.entry, "exit": week.exit,
@@ -470,13 +509,16 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
                                          "is_exit": code not in target})
                 if (n or empty_cash) and key not in dead_portfolios:
                     previous[key] = (target, returns)
-                    unknown_previous.discard(key)
                 else:
                     # Restart a new segment after a missing group; do not invent
                     # a cash portfolio or connect drift across the missing week.
                     previous.pop(key, None)
-                    if available_case and not signal_known:
-                        unknown_previous.add(key)
+                    if not signal_known:
+                        # An absent factor period is excluded, not invested in
+                        # cash. The next observed period funds a new theoretical
+                        # segment instead of drifting positions across the gap.
+                        previous_targets.pop(key, None)
+                        funded_portfolios.discard(key)
             high, low = period_results["Q10"], period_results["Q1"]
             spread_key = (variant, "Q10-Q1")
             complete = bool(high["complete"] and low["complete"] and spread_key not in dead_portfolios)
@@ -500,6 +542,7 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
 
             portfolio_rows.append({
                 "entry": week.entry, "exit": week.exit, "variant": variant, "portfolio": "Q10-Q1",
+                "signal_available": signal_known,
                 "n_stocks": high["n_stocks"] + low["n_stocks"],
                 "n_labels": high["n_labels"] + low["n_labels"],
                 "label_coverage": ((high["n_labels"] + low["n_labels"]) / (high["n_stocks"] + low["n_stocks"]))
@@ -526,17 +569,20 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
                 holding_rows.clear()
 
     ic_weekly = pd.DataFrame(ic_rows).sort_values(["variant", "method", "subset", "entry"])
+    ic_weekly["cumulative_ic"] = np.nan
+    ic_weekly["segment_id"] = np.nan
     summary_rows = []
     for (variant, method, subset), block in ic_weekly.groupby(["variant", "method", "subset"], sort=False):
+        block = block[block.signal_available]
         values = block.ic.to_numpy(dtype=float)
-        cumulative, segments = _segmented_path(values, compound=False)
+        cumulative, segments = _segmented_path(values, compound=False, entries=block.entry, exits=block.exit)
         ic_weekly.loc[block.index, "cumulative_ic"] = cumulative
         ic_weekly.loc[block.index, "segment_id"] = [np.nan if v is None else v for v in segments]
         good = values[np.isfinite(values)]
         n = len(good)
         mean = float(good.mean()) if n else np.nan
         sd = float(good.std(ddof=1)) if n > 1 else np.nan
-        nw = mean_interval(values, nw_lag)
+        nw = mean_interval(_values_with_gaps(values, _calendar_breaks(len(block), block.entry, block.exit)), nw_lag)
         summary_rows.append({
             "variant": variant, "method": method, "subset": subset, "n": n,
             "signal_observations": int(block.n_stocks.sum()),
@@ -550,6 +596,8 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
             "nw_lower": nw.get("lower"), "nw_upper": nw.get("upper"), "nw_status": nw["status"]})
 
     portfolio_weekly = pd.DataFrame(portfolio_rows).sort_values(["variant", "portfolio", "entry"])
+    for column in ("nav", "excess_nav", "segment_id", "excess_segment_id"):
+        portfolio_weekly[column] = np.nan
     portfolio_weekly["turnover_one_way"] = portfolio_weekly.turnover / 2.
     portfolio_weekly["target_turnover_one_way"] = portfolio_weekly.target_turnover / 2.
     continuing = ~portfolio_weekly.initial_build & np.isfinite(portfolio_weekly.turnover_one_way)
@@ -559,8 +607,9 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
     portfolio_weekly["turnover_warning_threshold"] = turnover_warning_threshold
     performance_rows, annual_rows = [], []
     for (variant, portfolio), block in portfolio_weekly.groupby(["variant", "portfolio"], sort=False):
-        nav, segments = _segmented_path(block["return"])
-        excess_nav, excess_segments = _segmented_path(block.excess_return)
+        block = block[block.signal_available]
+        nav, segments = _segmented_path(block["return"], entries=block.entry, exits=block.exit)
+        excess_nav, excess_segments = _segmented_path(block.excess_return, entries=block.entry, exits=block.exit)
         portfolio_weekly.loc[block.index, "nav"] = nav
         portfolio_weekly.loc[block.index, "excess_nav"] = excess_nav
         portfolio_weekly.loc[block.index, "segment_id"] = [np.nan if v is None else v for v in segments]
@@ -568,7 +617,10 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
         kwargs = {"annualization": annualization, "turnover_warning_threshold": turnover_warning_threshold}
         excess = None if portfolio == "Q10-Q1" else block.excess_return
         metrics = performance_metrics(block["return"], block.turnover, excess,
-                                      target_turnover=block.target_turnover, initial_build=block.initial_build, **kwargs)
+                                      target_turnover=block.target_turnover, initial_build=block.initial_build,
+                                      entries=block.entry, exits=block.exit, **kwargs)
+        if block.empty:
+            metrics["status"] = "no_data"
         if portfolio == "Q10-Q1":
             # (high - benchmark) - (low - benchmark) = high - low.
             # Keep legacy excess CAGR/nav absent for a self-financing spread.
@@ -579,7 +631,8 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
             annual_excess = None if portfolio == "Q10-Q1" else annual.excess_return
             metrics = performance_metrics(annual["return"], annual.turnover, annual_excess,
                                           target_turnover=annual.target_turnover,
-                                          initial_build=annual.initial_build, **kwargs)
+                                          initial_build=annual.initial_build,
+                                          entries=annual.entry, exits=annual.exit, **kwargs)
             if portfolio == "Q10-Q1":
                 metrics["excess_sharpe"] = metrics["sharpe_ratio"]
                 metrics["excess_sharpe_n_periods"] = metrics["sharpe_n_periods"]
@@ -593,9 +646,12 @@ def evaluate_factor(signals: pd.DataFrame, labels: pd.DataFrame, benchmark: pd.D
     metadata = [col for col in joined if col not in {"return", "unresolved", "trade_restricted"}]
     holdings = holdings.merge(joined[metadata], on=["entry", "exit", "variant", "code"],
                               how="left", validate="many_to_one")
+    ic_weekly = ic_weekly.loc[ic_weekly.signal_available].drop(columns="signal_available")
+    portfolio_weekly = portfolio_weekly.loc[portfolio_weekly.signal_available].drop(columns="signal_available")
     return {"ic_weekly": ic_weekly.reset_index(drop=True),
             "ic_summary": pd.DataFrame(summary_rows),
             "portfolio_weekly": portfolio_weekly.reset_index(drop=True),
             "performance": pd.DataFrame(performance_rows),
             "holdings": holdings,
-            "annual_performance": pd.DataFrame(annual_rows)}
+            "annual_performance": pd.DataFrame(annual_rows),
+            "excluded_periods": pd.DataFrame(excluded_rows, columns=["entry", "exit", "variant", "n_stocks", "reason"])}

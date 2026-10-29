@@ -12,6 +12,39 @@ from .data import read_frame, write_json
 from .panel import ensure_panel
 
 
+def describe_evaluation_window(config: Config, weeks: pd.DataFrame,
+                               signals: pd.DataFrame, excluded: pd.DataFrame) -> dict:
+    """Disclose signal-based exclusions independently of future return labels."""
+    grid = weeks.copy()
+    grid["entry"] = pd.to_datetime(grid.entry)
+    grid["exit"] = pd.to_datetime(grid.exit)
+    grid = grid.sort_values("entry")
+    bounds = config.raw.get("backtest", {})
+    day = lambda value: None if pd.isna(value) else pd.Timestamp(value).strftime("%Y-%m-%d")
+    window = {"policy": "exclude_missing_signal_periods", "selection_basis": "frozen_signals",
+              "requested_start": bounds.get("start_date") or day(grid.entry.min()),
+              "requested_end": bounds.get("end_date") or day(grid.exit.max()),
+              "requested_periods": len(grid), "variants": {}}
+    for variant in config.variants:
+        available = signals.loc[signals.variant.eq(variant), ["entry", "exit"]].drop_duplicates()
+        available = available.assign(entry=pd.to_datetime(available.entry), exit=pd.to_datetime(available.exit))
+        active = grid.merge(available, on=["entry", "exit"], how="inner", validate="one_to_one")
+        missing = excluded.loc[excluded.variant.eq(variant)]
+        years = set(grid.entry.dt.year)
+        active_years = set(active.entry.dt.year)
+        missing_years = set(pd.to_datetime(missing.entry).dt.year)
+        window["variants"][variant] = {
+            "included_periods": len(active), "excluded_periods": len(missing),
+            "holding_start": day(active.entry.min()), "holding_end": day(active.exit.max()),
+            "signal_start": day(active.cutoff.min()) if "cutoff" in active else day(active.entry.min()),
+            "signal_end": day(active.cutoff.max()) if "cutoff" in active else day(active.entry.max()),
+            "excluded_years": sorted(years - active_years),
+            "partially_excluded_years": sorted(missing_years & active_years),
+            "segments": int((active.entry.reset_index(drop=True) != active.exit.shift().reset_index(drop=True)).sum()),
+        }
+    return window
+
+
 def save_result_tables(directory, tables, holdings_csv_limit=1_000_000):
     """Large stock ledgers use lossless Parquet, avoiding multi-GB duplicate CSV."""
     artifacts = {}
@@ -156,6 +189,13 @@ def run_research(config: Config) -> dict:
                            "signal_start": manifest["signal_start"], "signal_end": manifest["signal_end"],
                            "holding_start": manifest["holding_start"], "holding_end": manifest["holding_end"]},
                 "summary": summary}
+        card["evaluation_window"] = describe_evaluation_window(config, weeks, signals, tables["excluded_periods"])
+        active = weeks.merge(signals[["entry", "exit"]].drop_duplicates(), on=["entry", "exit"],
+                             how="inner", validate="one_to_one")
+        card["sample"].update(requested_periods=len(weeks), weeks=len(active), periods=len(active),
+            holding_start=active.entry.min(), holding_end=active.exit.max(),
+            signal_start=active.cutoff.min() if "cutoff" in active else active.entry.min(),
+            signal_end=active.cutoff.max() if "cutoff" in active else active.entry.max())
         card["execution"] = dict(execution_card)
         card["variants"] = config.variants
         card["sample_policy"] = config.sample_policy
