@@ -157,9 +157,10 @@ class ConfigurableFrameworkTests(unittest.TestCase):
                 executed = pd.read_csv(directory / 'execution_periodic.csv')
                 self.assertEqual(set(executed.entry), set(periods.entry.dt.strftime('%Y-%m-%d')))
             report(config.output)
-            html = (config.output / result['factors'][0]['output_dir'] / 'report.html').read_text()
-            self.assertIn('月度', html)
-            self.assertIn('原样', html)
+            payload = json.loads((config.output / 'report_data.json').read_text())
+            self.assertEqual(payload['meta']['frequency'], 'monthly')
+            self.assertEqual(payload['meta']['annualization'], 12)
+            self.assertEqual(payload['config']['preprocess']['winsorize'], False)
 
 
 if __name__ == '__main__':

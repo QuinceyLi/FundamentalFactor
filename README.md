@@ -1,6 +1,8 @@
 # 单因子周度／月度回测框架
 
-版本 **0.3.0**：推荐配置统一采用AIQ字段补缺规则；实现、原始缺失/供值溯源及真实周/月回测验收见 [版本核验记录](docs/aiq_matrix_validation_20261028.md)。
+版本 **0.4.0**：统一离线研究报告整合 IC、十分组、年度、行情及行业／风格／市值持仓分析；详见 [统一报告说明](docs/unified_report.md)。
+
+此前 **0.3.0** 统一采用 AIQ 字段补缺规则；实现、原始缺失/供值溯源及真实周/月回测验收见 [版本核验记录](docs/aiq_matrix_validation_20261028.md)。
 
 读取外部已经计算好的因子值，分别测试 `ROIC_new` 和 `fundnum_promotion`，不重新计算财务或持仓变化公式。新推荐配置采用 `missing_values.method=aiq_matrix`，按 AIQ 字段矩阵规则补缺后测试；EMA 平滑、去极值、标准化和中性化仍可选，支持周度或月度调仓。输出包含覆盖度、RankIC/Pearson IC、十分组净值、超额净值、Q10−Q1、多头及多空超额夏普、年度表现和换手诊断。**不训练预测模型，也不使用持仓优化器**；目标持仓直接使用冻结的组内等权，缺失收益的统计权重另行记录，执行账本仅落实权重及成交约束。配置中的因子列表可以扩展到其他明细文件。
 
@@ -211,7 +213,7 @@ ST仍按事件及证据覆盖处理，过期未知不因数值矩阵补缺而延
 
 新运行另提供不依赖频率的 `periods.parquet`、`ic_periodic.csv`、`portfolio_periodic.csv`。为兼容旧调用方，仍保留 `weeks.parquet`、`ic_weekly.csv`、`portfolio_weekly.csv`；月度配置下这些兼容文件也存月度记录。以冻结配置的 `rebalance_frequency` 与实际 `entry/exit` 为准，报告按实际频率显示；不能从旧文件名推断调仓频率。
 
-每个 `factors/<name>/` 提供 `ic_weekly.csv`、`ic_summary.csv`、`portfolio_weekly.csv`、`performance.csv`、完整`holdings.parquet`、`annual_performance.csv`、摘要和独立HTML。缺失统计单列 `data_complete`、`missing_weight`、`evaluation_weight_sum`、`cash_weight`、`return_method`；换手单列 `turnover/annual_turnover` 与 `target_turnover/annual_target_turnover`。逐股账本不超过100万行时另存CSV；大型账本仅存Parquet，避免数GB重复导出，摘要记录行数和格式。根 `report.html` 为汇总索引及审计。图表离线渲染，不依赖CDN。源文件和缓存使用首尾各1MiB、大小及mtime的版本指纹，明确不是全文件哈希。重复运行同一配置得出相同数值；实验时间单独记录。
+每个 `factors/<name>/` 提供 `ic_weekly.csv`、`ic_summary.csv`、`portfolio_weekly.csv`、`performance.csv`、完整`holdings.parquet`、`annual_performance.csv`、摘要；原逐因子HTML地址跳转到统一报告。缺失统计单列 `data_complete`、`missing_weight`、`evaluation_weight_sum`、`cash_weight`、`return_method`；换手单列 `turnover/annual_turnover` 与 `target_turnover/annual_target_turnover`。逐股账本不超过100万行时另存CSV；大型账本仅存Parquet，避免数GB重复导出，摘要记录行数和格式。根 `report.html` 为唯一完整研究报告，包含IC、分组、年度、行情、持仓行业/风格/市值、基准覆盖和审计；`report_data.json`保留可复核数据。旧版报告生成代码已移除，详见[统一报告说明](docs/unified_report.md)。图表离线渲染，不依赖CDN。源文件和缓存使用首尾各1MiB、大小及mtime的版本指纹，明确不是全文件哈希。重复运行同一配置得出相同数值；实验时间单独记录。
 
 分类表的 `incentive_amount` 映射仅在输出中修正为 `alternative_incentive_amount.feather`，不修改附件。明细与加工汇总值不混用，`y_5` 不作为原始收益。
 
@@ -220,7 +222,7 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python3 -W error::FutureWarning -m unit
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python3 scripts/synthetic_smoke.py
 ```
 
-合成验收报告在 `outputs/factor_demo/run/report.html`；其两个因子报告验证完整流程，显式标注模拟数据，不能作为真实因子结论。
+合成验收报告在 `outputs/factor_demo/run/report.html`；其中两个因子验证完整流程，显式标注模拟数据，不能作为真实因子结论。
 
 ## GFOptim 停牌及受限成交账本
 

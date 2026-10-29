@@ -1,0 +1,93 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>因子研究报告</title><style>__CSS__</style></head><body><aside class="rail" aria-label="报告导航" id="reportNav">
+ <div class="brand"><span class="brand-mark">ƒ</span><div class="brand-info"><div class="brand-title">因子研究</div><div class="brand-sub">FACTOR RESEARCH</div></div></div>
+ <div class="rail-label">研究报告 / REPORT</div>
+ <nav>
+  <a href="#overview" class="active"><span class="nav-num">01</span><span class="nav-label">研究总览</span></a>
+  <a href="#ic-analysis"><span class="nav-num">02</span><span class="nav-label">IC 分析</span></a>
+  <a href="#portfolios"><span class="nav-num">03</span><span class="nav-label">分组回测</span></a>
+  <a href="#annual"><span class="nav-num">04</span><span class="nav-label">年度表现</span></a>
+  <a href="#regimes"><span class="nav-num">05</span><span class="nav-label">行情表现</span></a>
+  <a href="#profile"><span class="nav-num">06</span><span class="nav-label">持仓结构</span></a>
+  <a href="#compare"><span class="nav-num">07</span><span class="nav-label">中性化对照</span></a>
+  <a href="#coverage"><span class="nav-num">08</span><span class="nav-label">基准与覆盖</span></a>
+  <a href="#methods"><span class="nav-num">09</span><span class="nav-label">统计口径</span></a>
+ </nav>
+ <div class="rail-foot"><b><span class="status-dot"></span><span data-period></span>度因子测试</b>FACTOR RESEARCH<br></div>
+</aside>
+<button class="nav-shade" id="navShade" aria-label="关闭目录" hidden></button>
+<div class="workspace">
+ <header class="topbar"><div class="crumb"><button id="navToggle" class="outline" aria-controls="reportNav" aria-expanded="false">目录 ☰</button><span>研究工作台</span><span>/</span><b>单因子研究报告</b></div><div class="top-actions"><button class="outline" id="downloadButton">导出行情对照 ↓</button><button class="primary" id="printButton">打印 / PDF</button></div></header>
+ <main>
+ <section id="overview" style="scroll-margin-top:90px">
+  <div class="hero"><div><div class="eyebrow">FACTOR RESEARCH</div><h1><span id="factorTitle">ROIC</span> <span style="font-weight:300;color:#a8b0bd">/</span> 因子研究报告</h1></div><div class="hero-id"><span data-period></span>度调仓 · 十分组<br>费前理论收益</div></div>
+  <div class="filters">
+   <div class="field"><label for="factorSelect">研究因子</label><select class="select" id="factorSelect"></select></div>
+   <div class="field"><label for="rangeSelect">观察区间</label><select class="select" id="rangeSelect"><option value="all">全样本</option><option value="5">近 5 个自然年</option><option value="3">近 3 个自然年</option></select></div>
+   <div class="field version-field"><label>信号版本</label><div class="seg" id="variantControls"></div></div>
+  </div>
+  <div class="context"><span id="rangeCaption"></span><span>Q10：高因子值组</span><span>收益基准：研究股票池等权</span><span id="samplePolicy"></span></div>
+  <div id="reportIssues"></div><div class="kpis" id="kpiCards"></div>
+  <div class="grid-2">
+   <article class="panel"><div class="panel-head"><div><h3>Q10 超额净值</h3><p>所选信号版本</p></div><div class="chart-legend" id="navLegend"></div></div><div class="chart-wrap" id="navChart"></div><div class="chart-caption">持有期结束日 · 初始净值 1。行情：<span style="color:var(--bull)">上涨</span> / <span style="color:var(--side)">震荡过渡</span> / <span style="color:var(--bear)">下跌</span></div></article>
+   <article class="panel"><div class="panel-head"><div><h3>滚动 RankIC</h3><p><span id="rollingLabel"></span></p></div><span class="tag">完整观察区间</span></div><div class="chart-wrap" id="icChart"></div></article>
+  </div>
+ </section>
+ <section class="section" id="ic-analysis">
+ <div class="section-head"><div><div class="section-id">02 / INFORMATION COEFFICIENT</div><h2>IC 分析</h2></div><div class="seg" id="lgICControls"><button data-lg-ic="rank" aria-pressed="true">RankIC</button><button data-lg-ic="pearson" aria-pressed="false">Pearson IC</button></div></div>
+ <div class="grid-even">
+  <article class="panel"><div class="panel-head"><h3>逐期 IC</h3><span class="tag" id="lgICScope"></span></div><div id="lgWeeklyIC"></div></article>
+  <article class="panel"><div class="panel-head"><h3 id="lgICTrendTitle">累计 IC</h3><div class="seg" id="lgICTrendControls"><button data-lg-trend="cumulative" aria-pressed="true">累计</button><button data-lg-trend="rolling" aria-pressed="false">滚动均值</button></div></div><div id="lgICTrend"></div></article>
+ </div>
+ <article class="panel lg-table-panel"><div class="table-wrap" id="lgICTable"></div></article>
+</section>
+ <section class="section" id="portfolios">
+ <div class="section-head"><div><div class="section-id">03 / QUANTILE PORTFOLIOS</div><h2>分组回测</h2></div><div class="seg" id="lgReturnControls"><button data-lg-return="absolute" aria-pressed="true">组合收益</button><button data-lg-return="excess" aria-pressed="false">超额收益</button></div></div>
+ <article class="panel"><div class="panel-head"><h3 id="lgNavTitle">十分组净值</h3><button class="outline" id="lgAllGroups">显示全部分组</button></div><div class="lg-legend" id="lgPortfolioLegend"></div><div id="lgPortfolioNav"></div><div class="lg-axis-note"><span>Q1 低值组 → Q10 高值组</span><span id="lgBenchmarkLabel">基准：研究股票池等权</span></div></article>
+ <div class="grid-even lg-spaced">
+  <article class="panel"><div class="panel-head"><h3 id="lgReturnBarTitle">分组年化收益</h3><span class="tag">Q1—Q10</span></div><div id="lgGroupReturns"></div></article>
+  <article class="panel"><div class="panel-head"><h3>Q10 − Q1 净值</h3><span class="tag">期收益差复利</span></div><div id="lgSpreadNav"></div><div class="lg-spread-stats" id="lgSpreadStats"></div></article>
+ </div>
+ <details class="lg-detail panel"><summary>分组绩效明细 <span>收益 · 回撤 · 换手</span></summary><div class="table-wrap" id="lgPortfolioTable"></div></details>
+</section>
+ <section class="section" id="annual">
+ <div class="section-head"><div><div class="section-id">04 / ANNUAL PERFORMANCE</div><h2>年度表现</h2></div><div class="control-cluster"><label class="inline-label" for="lgAnnualGroup">组合</label><select class="select" id="lgAnnualGroup"><option value="Q10">Q10 高值组</option><option value="Q1">Q1 低值组</option><option value="spread">Q10 − Q1</option></select></div></div>
+ <article class="panel"><div class="lg-table-top"><span class="tiny muted">按入场年份统计</span><div class="lg-heat-legend"><span>负值</span><i></i><span>正值</span></div></div><div class="table-wrap" id="lgAnnualTable"></div></article>
+</section>
+ <section class="section" id="regimes">
+  <div class="section-head"><div><div class="section-id">05 / MARKET REGIMES</div><h2>行情表现</h2></div><span class="badge" id="regimeMethod">MA20 / MA120 · ±3%</span></div>
+  <div class="regime-controls"><div class="seg" id="regimeControls"><button data-regime="all" aria-pressed="true">全部行情</button><button data-regime="bull" aria-pressed="false">上涨</button><button data-regime="sideways" aria-pressed="false">震荡／过渡</button><button data-regime="bear" aria-pressed="false">下跌</button></div><span class="tiny muted">联动：条件指标 · 持仓结构 · 中性化对照</span></div>
+  <div class="regime-cards" id="regimeCards"></div>
+  <article class="panel"><div class="panel-head"><h3>分行情指标</h3><span class="tag">Q10 / 全样本 IC</span></div><div class="table-wrap" id="regimeTable"></div><div class="chart-caption" id="regimeNote"></div></article>
+ </section>
+ <section class="section" id="profile">
+  <div class="section-head"><div><div class="section-id">06 / HOLDINGS</div><h2>持仓结构</h2></div><span class="current-scope" id="profileScope"></span></div>
+  <div class="profile-toolbar"><div class="control-cluster"><span class="inline-label">观察组合</span><div class="seg" id="groupControls"><button data-group="Q10" aria-pressed="true">Q10 高值组</button><button data-group="Q1" aria-pressed="false">Q1 低值组</button><button data-group="spread" aria-pressed="false">Q10 − Q1</button></div></div><div class="control-cluster"><label class="inline-label" for="baseSelect">参照股票池</label><select class="select" id="baseSelect"><option value="common">当前信号样本等权</option><option value="universe">研究股票池等权</option></select><button class="help-button" id="baseHelp" aria-label="查看参照股票池定义" title="参照股票池定义">?</button></div></div>
+  <div class="grid-even">
+   <article class="panel"><div class="panel-head"><div><h3>行业权重与偏离</h3><p id="industrySubtitle">主动权重 · 百分点</p></div><span class="tag">冻结目标权重</span></div><div id="industryChart"></div><div class="chart-caption"><span id="industryDefinition"></span></div></article>
+   <article class="panel"><div class="panel-head"><div><h3>风格因子暴露</h3><p id="styleSubtitle">相对参照组合的标准化暴露</p></div></div><div class="chart-legend" id="styleLegend" style="margin:-5px 0 13px"></div><div id="styleChart" class="style-chart"></div><div class="style-head"><span class="tiny muted" id="styleZero"></span><button class="style-more" id="styleMore">展开全部 20 项 ↓</button></div></article>
+  </div>
+  <article class="panel size-panel"><div><div class="panel-head"><h3>规模暴露</h3></div><div class="size-reading"><div><div class="size-number" id="sizeValue"></div><div class="tiny muted">SIZE 相对暴露</div></div><div class="size-caption" id="sizeExplanation"></div></div></div><div><h3 id="capTitle">流通市值分布</h3><div id="capChart"></div><div class="chart-caption" id="capCaption"></div></div></article>
+ </section>
+ <section class="section" id="compare">
+  <div class="section-head"><div><div class="section-id">07 / NEUTRALIZATION</div><h2>中性化对照</h2></div><span class="current-scope" id="compareScope"></span></div>
+  <div class="comparison-grid" id="comparisonCards"></div>
+ </section>
+ <section class="section" id="coverage">
+ <div class="section-head"><div><div class="section-id">08 / BENCHMARK & COVERAGE</div><h2>基准与覆盖度</h2></div><span class="tag">完整观察区间</span></div>
+ <div class="lg-coverage-kpis" id="lgCoverageCards"></div>
+ <div class="grid-even">
+  <article class="panel"><div class="panel-head"><h3>基准净值</h3><span class="tag">研究股票池等权</span></div><div id="lgBenchmarkNav"></div></article>
+  <article class="panel"><div class="panel-head"><h3>股票样本数量</h3><span class="tag">每期</span></div><div class="chart-legend lg-small-legend"><span><i class="legend-line" style="background:#26364d"></i>研究股票池</span><span><i class="legend-line" style="background:#5484b5"></i>原始有效样本</span><span><i class="legend-line" style="background:#8f9be0"></i>共同样本</span></div><div id="lgCoverageCounts"></div></article>
+ </div>
+ <details class="lg-detail panel"><summary>覆盖度与缺失明细 <span>样本覆盖 · 标签完整性</span></summary><div class="table-wrap" id="lgCoverageTable"></div><div class="lg-reference-grid" id="coverageReferences"></div></details>
+</section>
+ <section class="section" id="methods">
+  <div class="section-head"><div><div class="section-id">09 / DEFINITIONS</div><h2>统计口径</h2></div></div>
+  <div id="definitions"></div>
+  <div id="auditTables"></div>
+ </section>
+ <footer class="footer"><span>FACTOR RESEARCH</span><span><span data-period></span>度 · 十分组 · 费前理论收益</span><span id="reportTimestamp"></span></footer>
+ </main>
+</div>
+<div class="tooltip" id="tooltip" role="status"></div><div class="toast" id="toast" role="status"></div>
+<script id="report-data" type="application/json">__DATA__</script><script>__JS__</script></body></html>

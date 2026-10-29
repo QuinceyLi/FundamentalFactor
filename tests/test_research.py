@@ -373,7 +373,8 @@ class IntegrationTests(unittest.TestCase):
             output = report(config.output)
             html = output.read_text()
             self.assertNotIn("<script src", html)
-            self.assertTrue("合成" in html or "SYNTHETIC" in html)
+            payload = json.loads((config.output / "report_data.json").read_text())
+            self.assertEqual(payload["meta"]["dataset_kind"], "synthetic")
             for factor in first["factors"]:
                 factor_dir = config.output / factor["output_dir"]
                 self.assertTrue((factor_dir / "report.html").exists())

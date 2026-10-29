@@ -12,7 +12,7 @@ from tests.fixtures import disk_fixture, enable_execution_fixture
 
 
 class ScopeAndTerminalTests(unittest.TestCase):
-    def test_industry_and_exchange_scope_reach_both_reports(self):
+    def test_industry_exchange_scope_and_execution_reach_unified_report(self):
         with tempfile.TemporaryDirectory() as folder:
             config = enable_execution_fixture(disk_fixture(Path(folder), weeks_count=3))
             raw = json.loads(config.path.read_text())
@@ -24,13 +24,14 @@ class ScopeAndTerminalTests(unittest.TestCase):
             result = run_research(config)
             report(config.output)
             self.assertEqual(result['benchmark']['exchanges'], ['SH', 'SZ'])
-            for factor in result['factors']:
-                body = (config.output / factor['output_dir'] / 'report.html').read_text()
-                self.assertIn('纯行业中性仅使用行业标签', body)
-                self.assertIn('投资域为沪深 A 股', body)
-                self.assertIn('行业中性化信号：执行账户', body)
-                self.assertNotIn('行业市值中性化信号', body)
-                self.assertNotIn('执行账本产物尚不完整', body)
+            data = json.loads((config.output / 'report_data.json').read_text())
+            self.assertEqual(data['config']['universe']['exchanges'], ['SH', 'SZ'])
+            self.assertFalse(data['config']['neutralization']['include_float_mcap'])
+            self.assertIn('industry', data['meta']['variants'])
+            self.assertNotIn('industry_size', data['meta']['variants'])
+            for factor in data['factors']:
+                self.assertTrue(factor['execution']['weekly'])
+                self.assertFalse(factor['execution']['issues'])
 
     def test_stock_sold_before_delisting_needs_no_cash_settlement(self):
         dates = pd.to_datetime(['2025-01-13', '2025-01-20', '2025-01-20'])
